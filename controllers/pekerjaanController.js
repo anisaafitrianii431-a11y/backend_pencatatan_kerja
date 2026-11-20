@@ -498,6 +498,29 @@ async function ambilPekerjaan(req, res) {
       return res.status(422).json({ success: false, message: 'Pekerjaan ini sudah selesai.' });
     }
 
+    if (job.status_pengambilan === 'ditutup') {
+      return res.status(422).json({
+        success: false,
+        message: 'Pengambilan mandiri untuk pekerjaan ini sedang ditutup oleh Admin.'
+      });
+    }
+
+    // Validasi kuota pekerja aktif
+    const kuota = job.kuota_pekerja !== null && job.kuota_pekerja !== '' && Number(job.kuota_pekerja) > 0 ? Number(job.kuota_pekerja) : null;
+    if (kuota !== null) {
+      const [countRows] = await db.query(
+        'SELECT COUNT(DISTINCT id_karyawan) AS total FROM penugasan WHERE id_pekerjaan = ? AND (status_penugasan IS NULL OR status_penugasan = "aktif")',
+        [id]
+      );
+      const totalAktif = Number(countRows[0]?.total || 0);
+      if (totalAktif >= kuota) {
+        return res.status(422).json({
+          success: false,
+          message: `Kuota pekerja untuk proyek ini sudah penuh (${totalAktif}/${kuota} pekerja).`
+        });
+      }
+    }
+
     const [existing] = await db.query(
       'SELECT id_penugasan FROM penugasan WHERE id_pekerjaan = ? AND id_karyawan = ? AND (status_penugasan IS NULL OR status_penugasan = "aktif")',
       [id, id_karyawan]

@@ -17,6 +17,63 @@ function getPeriode(req) {
   return req.query.periode || req.body?.periode || new Date().toISOString().slice(0, 7);
 }
 
+// Helper kalkulasi upah hybrid (Mendukung tarif per-proyek maupun tarif default karyawan)
+function calculateEmployeeWages(karyawan, absensiRows) {
+  let totalUpah = 0;
+  let totalJam = 0;
+  const uniqueDays = new Set();
+  const dayJobMap = new Set();
+  const sessionBreakdown = [];
+
+  const defaultTarif = Number(karyawan.nominal_upah) || Number(karyawan.tarif_per_jam) || 0;
+  const defaultJenis = karyawan.jenis_upah || 'per_jam';
+
+  for (const a of absensiRows) {
+    const durasi = Number(a.durasi_jam || 0);
+    totalJam += durasi;
+    const dateStr = a.tanggal ? String(a.tanggal).slice(0, 10) : '';
+    if (dateStr) uniqueDays.add(dateStr);
+
+    const jobNominal = Number(a.job_nominal_upah || 0);
+    const hasJobRate = jobNominal > 0;
+    const effectiveJenis = hasJobRate && a.job_jenis_upah ? a.job_jenis_upah : defaultJenis;
+    const effectiveTarif = hasJobRate ? jobNominal : defaultTarif;
+
+    let upahSesi = 0;
+    if (effectiveJenis === 'per_jam') {
+      upahSesi = durasi * effectiveTarif;
+      totalUpah += upahSesi;
+    } else if (effectiveJenis === 'per_hari') {
+      const dayKey = `${dateStr}_${hasJobRate ? a.id_pekerjaan : 'default'}`;
+      if (!dayJobMap.has(dayKey)) {
+        dayJobMap.add(dayKey);
+        upahSesi = effectiveTarif;
+        totalUpah += upahSesi;
+      }
+    }
+
+    sessionBreakdown.push({
+      ...a,
+      is_job_rate: hasJobRate,
+      effective_jenis: effectiveJenis,
+      effective_tarif: effectiveTarif,
+      upah_sesi: Math.round(upahSesi)
+    });
+  }
+
+  // Jika jenis upah karyawan adalah bulanan dan tidak ada upah berbasis proyek
+  if (defaultJenis === 'per_bulan' && totalUpah === 0 && uniqueDays.size > 0) {
+    totalUpah = defaultTarif;
+  }
+
+  return {
+    totalJam: Number(totalJam.toFixed(2)),
+    totalHari: uniqueDays.size,
+    totalUpah: Math.round(totalUpah),
+    sessionBreakdown
+  };
+}
+
 // 1. Dispatcher Utama / Rekap Penggajian Seluruh Karyawan (Admin)
 async function getRekapGaji(req, res) {
   try {
@@ -72,28 +129,31 @@ async function getRekapGaji(req, res) {
           sudah_ditetapkan: saved.status_penetapan === 'ditetapkan'
         });
       } else {
-        // Kalkulasi Live dari Absensi
+        // Kalkulasi Live dari Absensi (Join pekerjaan untuk kalkulasi upah hybrid)
         const [absRows] = await db.query(`
           SELECT 
-            COALESCE(SUM(${sqlDurasi}), 0) AS total_jam,
-            COUNT(DISTINCT a.tanggal) AS total_hari
+            a.id_absensi,
+            a.tanggal,
+            a.id_pekerjaan,
+            p.nama_pekerjaan,
+            p.jenis_upah AS job_jenis_upah,
+            p.nominal_upah AS job_nominal_upah,
+            ${sqlDurasi} AS durasi_jam
           FROM absensi a
+          LEFT JOIN pekerjaan p ON a.id_pekerjaan = p.id_pekerjaan
           WHERE a.id_karyawan = ? 
             AND a.status_verifikasi = 'disetujui'
             AND a.jam_pulang IS NOT NULL
             AND a.tanggal LIKE ?
         `, [k.id_karyawan, `${periode}%`]);
 
-        const totalJam = Number(absRows[0]?.total_jam || 0);
-        const totalHari = Number(absRows[0]?.total_hari || 0);
+        const calc = calculateEmployeeWages(k, absRows);
+        const totalJam = calc.totalJam;
+        const totalHari = calc.totalHari;
+        const totalUpah = calc.totalUpah;
 
         const jenisUpah = k.jenis_upah || 'per_jam';
         const tarif = Number(k.nominal_upah) || Number(k.tarif_per_jam) || 0;
-
-        let totalUpah = 0;
-        if (jenisUpah === 'per_jam') totalUpah = totalJam * tarif;
-        else if (jenisUpah === 'per_hari') totalUpah = totalHari * tarif;
-        else if (jenisUpah === 'per_bulan') totalUpah = totalHari > 0 ? tarif : 0;
 
         // Reimburse uang pribadi disetujui pada periode ini
         const [reimburseRows] = await db.query(`
@@ -200,21 +260,13 @@ async function getDetailGaji(req, res) {
       ORDER BY tanggal DESC
     `, [id_karyawan, `${periode}%`]);
 
-    let totalJam = 0;
-    const uniqueDays = new Set();
-    absensiList.forEach(a => {
-      totalJam += Number(a.durasi_jam || 0);
-      if (a.tanggal) uniqueDays.add(String(a.tanggal).slice(0, 10));
-    });
-
-    const totalHari = uniqueDays.size;
+    const calc = calculateEmployeeWages(karyawan, absensiList);
+    const totalJam = calc.totalJam;
+    const totalHari = calc.totalHari;
     const jenisUpah = gajiLocked?.jenis_upah || karyawan.jenis_upah || 'per_jam';
     const tarif = Number(gajiLocked?.tarif || karyawan.nominal_upah || karyawan.tarif_per_jam || 0);
 
-    let totalUpah = 0;
-    if (jenisUpah === 'per_jam') totalUpah = totalJam * tarif;
-    else if (jenisUpah === 'per_hari') totalUpah = totalHari * tarif;
-    else if (jenisUpah === 'per_bulan') totalUpah = totalHari > 0 ? tarif : 0;
+    const totalUpah = gajiLocked ? (Number(gajiLocked.total_upah) || 0) : calc.totalUpah;
 
     const totalReimburse = reimburseList.reduce((acc, curr) => acc + Number(curr.nominal || 0), 0);
     const bonus = Number(gajiLocked?.bonus || 0);
@@ -245,7 +297,7 @@ async function getDetailGaji(req, res) {
         sisa_pembayaran: Math.max(0, gajiBersih - Number(gajiLocked?.total_dibayar || 0)),
         status_bayar: gajiLocked?.status_bayar || 'belum',
         status_penetapan: gajiLocked?.status_penetapan || 'draft',
-        absensi_list: absensiList,
+        absensi_list: calc.sessionBreakdown,
         reimburse_list: reimburseList
       }
     });

@@ -32,6 +32,40 @@ function getJakartaNow() {
   return { tanggal: dateStr, jam: timeStr };
 }
 
+// Helper parsing koordinat lat, lng dari parameter terpisah atau string "lat, lng"
+function parseCoordinates(lat, lng, titikStr) {
+  let latNum = Number(lat);
+  let lngNum = Number(lng);
+  if ((isNaN(latNum) || isNaN(lngNum) || (!latNum && !lngNum)) && typeof titikStr === 'string' && titikStr.includes(',')) {
+    const parts = titikStr.split(',');
+    latNum = parseFloat(parts[0]?.trim());
+    lngNum = parseFloat(parts[1]?.trim());
+  }
+  if (!isNaN(latNum) && !isNaN(lngNum) && (latNum !== 0 || lngNum !== 0)) {
+    return { lat: latNum, lng: lngNum };
+  }
+  return null;
+}
+
+// Rumus Haversine: Menghitung jarak presisi dua titik koordinat GPS di bumi (dalam satuan meter)
+function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
+  const p1 = Number(lat1);
+  const l1 = Number(lon1);
+  const p2 = Number(lat2);
+  const l2 = Number(lon2);
+  if (isNaN(p1) || isNaN(l1) || isNaN(p2) || isNaN(l2)) return null;
+
+  const R = 6371000; // Radius bumi dalam meter
+  const dLat = (p2 - p1) * Math.PI / 180;
+  const dLon = (l2 - l1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(p1 * Math.PI / 180) * Math.cos(p2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
 // 1. Ambil Semua Data Absensi (Dengan filter & relasi nama karyawan serta proyek)
 async function getAllAbsensi(req, res) {
   try {
@@ -176,7 +210,32 @@ async function absenMasuk(req, res) {
     const fotoSaved = saveBase64Image(rawPhoto, 'absensi', 'absensi_masuk_');
 
     const finalTitikLokasi = titik_lokasi || (masuk_latitude && masuk_longitude ? `${masuk_latitude}, ${masuk_longitude}` : null);
-    const jarak = jarak_masuk !== undefined ? Number(jarak_masuk) : (jarak_meter !== undefined ? Number(jarak_meter) : 0);
+    let finalJarak = jarak_masuk !== undefined ? Number(jarak_masuk) : (jarak_meter !== undefined ? Number(jarak_meter) : 0);
+    let finalCatatan = catatan ? String(catatan).trim() : '';
+
+    // Ambil data lokasi & radius proyek untuk validasi Geofencing backend
+    const [projectRows] = await db.query(
+      'SELECT latitude, longitude, titik_lokasi, radius_meter FROM pekerjaan WHERE id_pekerjaan = ?',
+      [id_pekerjaan]
+    );
+
+    if (projectRows.length > 0) {
+      const job = projectRows[0];
+      const jobCoords = parseCoordinates(job.latitude, job.longitude, job.titik_lokasi);
+      const userCoords = parseCoordinates(masuk_latitude, masuk_longitude, finalTitikLokasi);
+      const maxRadius = Number(job.radius_meter) || 100;
+
+      if (jobCoords && userCoords) {
+        const computedDist = calculateHaversineDistance(jobCoords.lat, jobCoords.lng, userCoords.lat, userCoords.lng);
+        if (computedDist !== null) {
+          finalJarak = computedDist;
+          if (computedDist > maxRadius) {
+            const warningTag = `[Di luar radius: ${computedDist}m / maks ${maxRadius}m]`;
+            finalCatatan = finalCatatan ? `${finalCatatan} ${warningTag}` : warningTag;
+          }
+        }
+      }
+    }
 
     // Cek apakah hari ini sudah absen masuk untuk pekerjaan yang sama dan belum pulang
     const [existing] = await db.query(
@@ -200,7 +259,7 @@ async function absenMasuk(req, res) {
         fotoSaved, fotoSaved,
         masuk_latitude || null, masuk_longitude || null, masuk_alamat || null,
         finalTitikLokasi,
-        jarak, jarak, catatan || null
+        finalJarak, finalJarak, finalCatatan || null
       ]
     );
 
@@ -258,7 +317,7 @@ async function absenPulang(req, res) {
     const fotoSaved = saveBase64Image(rawPhoto, 'absensi', 'absensi_pulang_');
 
     const titikPulang = req.body.titik_pulang || req.body.titik_lokasi || (req.body.pulang_latitude && req.body.pulang_longitude ? `${req.body.pulang_latitude}, ${req.body.pulang_longitude}` : null);
-    const jarakPulang = req.body.jarak_pulang !== undefined ? Number(req.body.jarak_pulang) : (req.body.jarak_meter !== undefined ? Number(req.body.jarak_meter) : null);
+    let jarakPulang = req.body.jarak_pulang !== undefined ? Number(req.body.jarak_pulang) : (req.body.jarak_meter !== undefined ? Number(req.body.jarak_meter) : null);
 
     // Ambil data absensi masuk untuk validasi durasi
     const [absRows] = await db.query('SELECT * FROM absensi WHERE id_absensi = ?', [id]);
@@ -270,6 +329,25 @@ async function absenPulang(req, res) {
     }
 
     const curr = absRows[0];
+
+    // Validasi Geofencing backend saat pulang jika koordinat pulang tersedia
+    if (curr.id_pekerjaan) {
+      const [projRows] = await db.query(
+        'SELECT latitude, longitude, titik_lokasi, radius_meter FROM pekerjaan WHERE id_pekerjaan = ?',
+        [curr.id_pekerjaan]
+      );
+      if (projRows.length > 0) {
+        const job = projRows[0];
+        const jobCoords = parseCoordinates(job.latitude, job.longitude, job.titik_lokasi);
+        const userCoordsPulang = parseCoordinates(req.body.pulang_latitude, req.body.pulang_longitude, titikPulang);
+        if (jobCoords && userCoordsPulang) {
+          const distPulang = calculateHaversineDistance(jobCoords.lat, jobCoords.lng, userCoordsPulang.lat, userCoordsPulang.lng);
+          if (distPulang !== null) {
+            jarakPulang = distPulang;
+          }
+        }
+      }
+    }
     const isOvernight = Boolean(req.body.is_overnight);
 
     // Hitung durasi jam

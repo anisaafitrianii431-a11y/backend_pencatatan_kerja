@@ -41,7 +41,17 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024 }
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = /jpeg|jpg|png|webp|gif|pdf|svg/i;
+    const ext = path.extname(file.originalname || '').toLowerCase().replace('.', '');
+    const mime = (file.mimetype || '').toLowerCase();
+    if (allowed.test(ext) || allowed.test(mime)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Format file tidak didukung. Harap upload gambar (JPG, PNG, WEBP) atau PDF.'));
+    }
+  }
 });
 
 // Middleware Global
