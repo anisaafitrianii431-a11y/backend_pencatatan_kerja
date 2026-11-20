@@ -305,18 +305,12 @@ async function createPekerjaan(req, res) {
     const empIds = Array.isArray(id_karyawan_list) ? id_karyawan_list : (id_karyawan_list ? String(id_karyawan_list).split(',').map(Number) : []);
     for (const idKar of empIds) {
       if (idKar > 0) {
+        // Penugasan anggota tim pelaksana ke pekerjaan
         await db.query(
           `INSERT INTO penugasan (id_pekerjaan, id_karyawan, peran_tugas, jenis_penugasan, status_baca, status_penugasan) 
            VALUES (?, ?, 'Anggota Tim Pelaksana', 'admin', 'belum', 'aktif')`,
           [idPekerjaan, idKar]
         );
-        // Sinkronkan upah jika nominal > 0
-        if (Number(nominal_upah) > 0) {
-          await db.query(
-            'UPDATE karyawan SET jenis_upah = ?, nominal_upah = ?, tarif_per_jam = CASE WHEN ? = "per_jam" THEN ? ELSE tarif_per_jam END WHERE id_karyawan = ?',
-            [jenis_upah, nominal_upah, jenis_upah, nominal_upah, idKar]
-          );
-        }
       }
     }
 

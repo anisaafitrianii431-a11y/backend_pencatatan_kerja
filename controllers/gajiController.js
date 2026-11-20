@@ -17,7 +17,7 @@ function getPeriode(req) {
   return req.query.periode || req.body?.periode || new Date().toISOString().slice(0, 7);
 }
 
-// Helper kalkulasi upah hybrid (Mendukung tarif per-proyek maupun tarif default karyawan)
+// Helper kalkulasi upah hybrid (Tarif jabatan karyawan sebagai standar utama, mendukung multi-proyek)
 function calculateEmployeeWages(karyawan, absensiRows) {
   let totalUpah = 0;
   let totalJam = 0;
@@ -35,16 +35,17 @@ function calculateEmployeeWages(karyawan, absensiRows) {
     if (dateStr) uniqueDays.add(dateStr);
 
     const jobNominal = Number(a.job_nominal_upah || 0);
-    const hasJobRate = jobNominal > 0;
-    const effectiveJenis = hasJobRate && a.job_jenis_upah ? a.job_jenis_upah : defaultJenis;
-    const effectiveTarif = hasJobRate ? jobNominal : defaultTarif;
+    // Prioritas: Tarif jabatan karyawan utama (beda jabatan beda gaji).
+    // Jika karyawan belum diset tarifnya, gunakan tarif proyek jika ada
+    const effectiveTarif = defaultTarif > 0 ? defaultTarif : jobNominal;
+    const effectiveJenis = defaultJenis || (a.job_jenis_upah ? a.job_jenis_upah : 'per_jam');
 
     let upahSesi = 0;
     if (effectiveJenis === 'per_jam') {
       upahSesi = durasi * effectiveTarif;
       totalUpah += upahSesi;
     } else if (effectiveJenis === 'per_hari') {
-      const dayKey = `${dateStr}_${hasJobRate ? a.id_pekerjaan : 'default'}`;
+      const dayKey = `${dateStr}_${a.id_pekerjaan || 'default'}`;
       if (!dayJobMap.has(dayKey)) {
         dayJobMap.add(dayKey);
         upahSesi = effectiveTarif;
@@ -54,7 +55,7 @@ function calculateEmployeeWages(karyawan, absensiRows) {
 
     sessionBreakdown.push({
       ...a,
-      is_job_rate: hasJobRate,
+      is_job_rate: defaultTarif === 0 && jobNominal > 0,
       effective_jenis: effectiveJenis,
       effective_tarif: effectiveTarif,
       upah_sesi: Math.round(upahSesi)
@@ -315,6 +316,9 @@ async function getDetailGaji(req, res) {
     const touchJob = (jobId, jobName, jobLocation, jobStatus, jobPeran, jobJenis, jobRate) => {
       const idNum = Number(jobId);
       if (!idNum) return null;
+      const effectiveRate = tarif > 0 ? tarif : (Number(jobRate) || 0);
+      const effectiveType = jenisUpah || jobJenis || 'per_jam';
+
       if (!jobMap.has(idNum)) {
         jobMap.set(idNum, {
           id_pekerjaan: idNum,
@@ -322,8 +326,8 @@ async function getDetailGaji(req, res) {
           lokasi: jobLocation || '',
           status_pekerjaan: jobStatus || 'berjalan',
           peran_tugas: jobPeran || 'Anggota Tim Pelaksana',
-          jenis_upah: jobJenis || jenisUpah,
-          nominal_upah: Number(jobRate) || tarif,
+          jenis_upah: effectiveType,
+          nominal_upah: effectiveRate,
           jumlah_sesi_disetujui: 0,
           jumlah_sesi_menunggu: 0,
           total_jam_disetujui: 0,
@@ -335,6 +339,10 @@ async function getDetailGaji(req, res) {
           pengeluaran_kantor_disetujui: kantorMap.get(idNum) || 0,
           total_kontribusi: 0
         });
+      } else {
+        const existing = jobMap.get(idNum);
+        if (jobPeran && existing.peran_tugas === 'Anggota Tim Pelaksana') existing.peran_tugas = jobPeran;
+        if (effectiveRate > 0) existing.nominal_upah = effectiveRate;
       }
       return jobMap.get(idNum);
     };
@@ -344,7 +352,7 @@ async function getDetailGaji(req, res) {
     });
 
     calc.sessionBreakdown.forEach(a => {
-      const entry = touchJob(a.id_pekerjaan, a.nama_pekerjaan, a.lokasi, a.status_pekerjaan, null, a.job_jenis_upah, a.job_nominal_upah);
+      const entry = touchJob(a.id_pekerjaan, a.nama_pekerjaan, a.lokasi, a.status_pekerjaan, null, a.effective_jenis, a.effective_tarif);
       if (entry) {
         entry.jumlah_sesi_disetujui += 1;
         entry.total_jam_disetujui = Number((entry.total_jam_disetujui + Number(a.durasi_jam || 0)).toFixed(2));
