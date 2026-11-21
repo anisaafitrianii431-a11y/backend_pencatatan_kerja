@@ -119,6 +119,8 @@ app.use('/api/absensi', require('./routes/absensiRoutes'));
 app.use('/api/pengeluaran', require('./routes/pengeluaranRoutes'));
 app.use('/api/gaji', require('./routes/gajiRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
+app.use('/api/master-role', require('./routes/masterRoleRoutes'));
+app.use('/api/master_role', require('./routes/masterRoleRoutes'));
 
 // ==========================================
 // ALIAS KOMPATIBILITAS FRONTEND REACT
