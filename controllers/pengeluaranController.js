@@ -1108,7 +1108,7 @@ async function getRekapUangKantor(req, res) {
       SELECT id_karyawan, kode_karyawan, nama, jabatan
       FROM karyawan
       WHERE status = 'aktif'
-      ORDER BY nama ASC
+      ORDER BY id_karyawan DESC
     `);
 
     const result = [];
@@ -1180,6 +1180,36 @@ async function getRekapUangKantor(req, res) {
   }
 }
 
+async function updateDanaKantor(req, res) {
+  try {
+    const id = Number(req.params.id || req.body?.id_dana || req.body?.id_kas);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ success: false, message: 'ID dana tidak valid.' });
+    const { tanggal, sumber_dana, pemberi_dana, penerima_dana, id_penanggung_jawab, id_pekerjaan, nominal, keterangan, tujuan_penggunaan, bukti_transaksi } = req.body;
+    const [result] = await db.query(`
+      UPDATE dana_kantor SET
+        tanggal = COALESCE(?, tanggal),
+        sumber_dana = COALESCE(?, sumber_dana),
+        pemberi_dana = COALESCE(?, pemberi_dana),
+        penerima_dana = COALESCE(?, penerima_dana),
+        id_penanggung_jawab = COALESCE(?, id_penanggung_jawab),
+        id_pekerjaan = COALESCE(?, id_pekerjaan),
+        nominal = COALESCE(?, nominal),
+        keterangan = COALESCE(?, keterangan),
+        tujuan_penggunaan = COALESCE(?, tujuan_penggunaan),
+        bukti_transaksi = COALESCE(?, bukti_transaksi)
+      WHERE id_dana = ?
+    `, [tanggal || null, sumber_dana || null, pemberi_dana || null, penerima_dana || null,
+      id_penanggung_jawab || null, id_pekerjaan || null,
+      nominal !== undefined && nominal !== '' ? Number(nominal) : null,
+      keterangan ?? null, tujuan_penggunaan ?? null, bukti_transaksi || null, id]);
+    if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Transaksi dana tidak ditemukan.' });
+    return res.json({ success: true, message: 'Transaksi dana berhasil diperbarui.', data: { id_dana: id, id_kas: id } });
+  } catch (error) {
+    console.error('Error updateDanaKantor:', error);
+    return res.status(500).json({ success: false, message: 'Gagal memperbarui transaksi dana.' });
+  }
+}
+
 module.exports = {
   getAllPengeluaran,
   getSummary,
@@ -1192,6 +1222,7 @@ module.exports = {
   getKasList,
   tambahDanaKantor,
   deleteDanaKantor,
+  updateDanaKantor,
   getReimbursementList,
   bayarReimbursement,
   getRiwayatBayarReimbursement,

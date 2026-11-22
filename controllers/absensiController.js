@@ -32,6 +32,45 @@ function getJakartaNow() {
   return { tanggal: dateStr, jam: timeStr };
 }
 
+// Helper kalkulasi evaluasi keterlambatan berdasarkan standar proyek
+function evaluateKeterlambatan(jamMasuk, jamMasukStandar = '08:00:00', toleransiMenit = 15) {
+  const jamStandar = jamMasukStandar || '08:00:00';
+  const toleransi = Number(toleransiMenit !== undefined && toleransiMenit !== null ? toleransiMenit : 15);
+
+  if (!jamMasuk) {
+    return {
+      jam_masuk_standar: jamStandar,
+      toleransi_terlambat_menit: toleransi,
+      status_keterlambatan: 'tepat_waktu',
+      menit_terlambat: 0
+    };
+  }
+
+  const [sh, sm] = String(jamStandar).split(':').map(Number);
+  const standarMin = (sh || 0) * 60 + (sm || 0);
+  const batasMin = standarMin + toleransi;
+
+  const [ah, am] = String(jamMasuk).split(':').map(Number);
+  const masukMin = (ah || 0) * 60 + (am || 0);
+
+  if (masukMin <= batasMin) {
+    return {
+      jam_masuk_standar: jamStandar,
+      toleransi_terlambat_menit: toleransi,
+      status_keterlambatan: 'tepat_waktu',
+      menit_terlambat: 0
+    };
+  }
+
+  const menitLate = Math.max(0, masukMin - standarMin);
+  return {
+    jam_masuk_standar: jamStandar,
+    toleransi_terlambat_menit: toleransi,
+    status_keterlambatan: 'terlambat',
+    menit_terlambat: menitLate
+  };
+}
+
 // Helper parsing koordinat lat, lng dari parameter terpisah atau string "lat, lng"
 function parseCoordinates(lat, lng, titikStr) {
   let latNum = Number(lat);
@@ -66,7 +105,7 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   return Math.round(R * c);
 }
 
-// 1. Ambil Semua Data Absensi (Dengan filter & relasi nama karyawan serta proyek)
+// 1. Ambil Semua Data Absensi (Dengan filter & evaluasi keterlambatan berbasis proyek)
 async function getAllAbsensi(req, res) {
   try {
     const { id_karyawan, id_pekerjaan, tanggal, bulan, status_verifikasi } = req.query;
@@ -84,6 +123,8 @@ async function getAllAbsensi(req, res) {
         p.lokasi AS lokasi_pekerjaan,
         p.titik_lokasi AS titik_proyek,
         p.radius_meter,
+        p.jam_masuk_standar,
+        p.toleransi_terlambat_menit,
         ${sqlDurasi} AS total_jam_kerja
       FROM absensi a
       LEFT JOIN karyawan k ON a.id_karyawan = k.id_karyawan
@@ -140,6 +181,9 @@ async function getAllAbsensi(req, res) {
       const m = totalMenit % 60;
       const durasiFormat = totalMenit > 0 ? `${j}j ${m}m` : (a.jam_pulang ? '0j 0m' : 'Sedang Berjalan');
 
+      // Evaluasi toleransi keterlambatan
+      const evalLate = evaluateKeterlambatan(a.jam_masuk, a.jam_masuk_standar, a.toleransi_terlambat_menit);
+
       return {
         ...a,
         foto_masuk: fotoMasuk,
@@ -156,7 +200,11 @@ async function getAllAbsensi(req, res) {
         sesuai_titik_pulang: sesuaiTitikPulang,
         durasi_jam: totalJam,
         durasi_format: durasiFormat,
-        durasi_menit: totalMenit
+        durasi_menit: totalMenit,
+        jam_masuk_standar: evalLate.jam_masuk_standar,
+        toleransi_terlambat_menit: evalLate.toleransi_terlambat_menit,
+        status_keterlambatan: evalLate.status_keterlambatan,
+        menit_terlambat: evalLate.menit_terlambat
       };
     });
 
@@ -213,11 +261,18 @@ async function absenMasuk(req, res) {
     let finalJarak = jarak_masuk !== undefined ? Number(jarak_masuk) : (jarak_meter !== undefined ? Number(jarak_meter) : 0);
     let finalCatatan = catatan ? String(catatan).trim() : '';
 
-    // Ambil data lokasi & radius proyek untuk validasi Geofencing backend
+    // Ambil data lokasi & radius proyek untuk validasi Geofencing backend & evaluasi keterlambatan
     const [projectRows] = await db.query(
-      'SELECT latitude, longitude, titik_lokasi, radius_meter FROM pekerjaan WHERE id_pekerjaan = ?',
+      'SELECT latitude, longitude, titik_lokasi, radius_meter, jam_masuk_standar, toleransi_terlambat_menit FROM pekerjaan WHERE id_pekerjaan = ?',
       [id_pekerjaan]
     );
+
+    let evalLate = {
+      jam_masuk_standar: '08:00:00',
+      toleransi_terlambat_menit: 15,
+      status_keterlambatan: 'tepat_waktu',
+      menit_terlambat: 0
+    };
 
     if (projectRows.length > 0) {
       const job = projectRows[0];
@@ -235,6 +290,8 @@ async function absenMasuk(req, res) {
           }
         }
       }
+
+      evalLate = evaluateKeterlambatan(finalJamMasuk, job.jam_masuk_standar, job.toleransi_terlambat_menit);
     }
 
     // Cek apakah hari ini sudah absen masuk untuk pekerjaan yang sama dan belum pulang
@@ -268,11 +325,17 @@ async function absenMasuk(req, res) {
       message: 'Absen masuk berhasil dicatat! Menunggu persetujuan Admin.',
       data: {
         id_absensi: result.insertId,
+        id_pekerjaan: Number(id_pekerjaan),
+        id_karyawan: Number(workerId),
         tanggal: finalTanggal,
         jam_masuk: finalJamMasuk,
         foto_masuk: fotoSaved,
         titik_lokasi: finalTitikLokasi,
-        status_verifikasi: 'menunggu'
+        status_verifikasi: 'menunggu',
+        jam_masuk_standar: evalLate.jam_masuk_standar,
+        toleransi_terlambat_menit: evalLate.toleransi_terlambat_menit,
+        status_keterlambatan: evalLate.status_keterlambatan,
+        menit_terlambat: evalLate.menit_terlambat
       }
     });
   } catch (error) {
@@ -461,5 +524,6 @@ module.exports = {
   getAllAbsensi,
   absenMasuk,
   absenPulang,
-  verifikasiAbsensi
+  verifikasiAbsensi,
+  evaluateKeterlambatan
 };

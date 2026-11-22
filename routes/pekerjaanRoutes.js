@@ -16,7 +16,12 @@ const {
   getPekerjaanLaporan,
   createPekerjaanLaporan,
   setujuiPekerjaanLaporan,
-  tolakPekerjaanLaporan
+  tolakPekerjaanLaporan,
+  // Fitur Fase 2
+  getPekerjaanBlueprint,
+  updatePekerjaanBlueprint,
+  getPekerjaanBudgetSummary,
+  getPekerjaanKandidatKaryawan
 } = require('../controllers/pekerjaanController');
 
 // Dispatcher root untuk kompatibilitas /api/pekerjaan dan /api/pekerjaan.php
@@ -26,9 +31,23 @@ router.all('/', (req, res, next) => {
 
   if (action === 'tersedia') return getPekerjaanTersedia(req, res);
   if (action === 'ambil') return ambilPekerjaan(req, res);
+  if (action === 'blueprint' && rawId) {
+    const bId = parseInt(rawId, 10);
+    if (req.method === 'PUT') return updatePekerjaanBlueprint({ ...req, params: { id: bId } }, res);
+    return getPekerjaanBlueprint({ ...req, params: { id: bId } }, res);
+  }
+  if (action === 'budget-summary' && rawId) {
+    const bId = parseInt(rawId, 10);
+    return getPekerjaanBudgetSummary({ ...req, params: { id: bId } }, res);
+  }
+  if (action === 'kandidat-karyawan' && rawId) {
+    const bId = parseInt(rawId, 10);
+    return getPekerjaanKandidatKaryawan({ ...req, params: { id: bId } }, res);
+  }
+
   if (req.method === 'POST') return createPekerjaan(req, res);
-  if (req.method === 'PUT') return updatePekerjaan(req, res);
-  if (req.method === 'DELETE') return deletePekerjaan(req, res);
+  if (req.method === 'PUT') return updatePekerjaan(rawId ? { ...req, params: { ...req.params, id: parseInt(rawId, 10) } } : req, res);
+  if (req.method === 'DELETE') return deletePekerjaan(rawId ? { ...req, params: { ...req.params, id: parseInt(rawId, 10) } } : req, res);
   if (rawId) {
     if (String(rawId).includes('/pekerja')) {
       const jId = parseInt(rawId, 10);
@@ -37,6 +56,19 @@ router.all('/', (req, res, next) => {
     if (String(rawId).includes('/laporan')) {
       const jId = parseInt(rawId, 10);
       return getPekerjaanLaporan({ ...req, params: { id: jId } }, res);
+    }
+    if (String(rawId).includes('/blueprint')) {
+      const jId = parseInt(rawId, 10);
+      if (req.method === 'PUT') return updatePekerjaanBlueprint({ ...req, params: { id: jId } }, res);
+      return getPekerjaanBlueprint({ ...req, params: { id: jId } }, res);
+    }
+    if (String(rawId).includes('/budget-summary')) {
+      const jId = parseInt(rawId, 10);
+      return getPekerjaanBudgetSummary({ ...req, params: { id: jId } }, res);
+    }
+    if (String(rawId).includes('/kandidat-karyawan')) {
+      const jId = parseInt(rawId, 10);
+      return getPekerjaanKandidatKaryawan({ ...req, params: { id: jId } }, res);
     }
     const numId = parseInt(rawId, 10);
     if (!isNaN(numId) && numId > 0) {
@@ -54,7 +86,13 @@ router.post('/laporan/:id/tolak', tolakPekerjaanLaporan);
 // Endpoint Pekerjaan Tersedia & Ambil Mandiri
 router.get('/tersedia', getPekerjaanTersedia);
 
-// Endpoint Terkait Pekerjaan Tertentu
+// Endpoint Terkait Pekerjaan Tertentu (Fase 2 Blueprint, Budget Summary, Kandidat)
+router.get('/:id/blueprint', getPekerjaanBlueprint);
+router.put('/:id/blueprint', updatePekerjaanBlueprint);
+router.get('/:id/budget-summary', getPekerjaanBudgetSummary);
+router.get('/:id/kandidat-karyawan', getPekerjaanKandidatKaryawan);
+
+// Endpoint Terkait Pekerjaan Tertentu (Fase Sebelumnya)
 router.get('/:id/pekerja', getPekerjaanPekerja);
 router.post('/:id/tambah-pekerja', tambahPekerjaKePekerjaan);
 router.post('/:id/pekerja/:assignmentId/batalkan', batalkanPenugasanPekerja);

@@ -55,7 +55,9 @@ const upload = multer({
 });
 
 // Middleware Global
-app.use(cors());
+const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://127.0.0.1:5173')
+  .split(',').map((origin) => origin.trim()).filter(Boolean);
+app.use(cors({ origin: allowedOrigins.length > 0 ? allowedOrigins : true, credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -83,7 +85,9 @@ app.use((req, res, next) => {
 });
 
 const userResolver = require('./middlewares/userResolver');
+const authorizeRequest = require('./middlewares/authorizeRequest');
 app.use(userResolver);
+app.use(authorizeRequest);
 
 // Akses publik untuk folder foto upload (absensi & nota)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -121,6 +125,7 @@ app.use('/api/gaji', require('./routes/gajiRoutes'));
 app.use('/api/users', require('./routes/userRoutes'));
 app.use('/api/master-role', require('./routes/masterRoleRoutes'));
 app.use('/api/master_role', require('./routes/masterRoleRoutes'));
+app.use('/api/role-permissions', require('./routes/rolePermissionRoutes'));
 
 // ==========================================
 // ALIAS KOMPATIBILITAS FRONTEND REACT
@@ -146,6 +151,11 @@ app.use('/api/gaji.php', require('./routes/gajiRoutes'));
 app.use('/api/users.php', require('./routes/userRoutes'));
 app.use('/api/rekap.php', (req, res) => require('./controllers/rekapController').getDashboardRekap(req, res));
 app.use('/api/rekap', (req, res) => require('./controllers/rekapController').getDashboardRekap(req, res));
+
+// 404 JSON Handler untuk seluruh endpoint API agar selalu merespons JSON
+app.use('/api', (req, res) => {
+  res.status(404).json({ success: false, message: `Endpoint API tidak ditemukan: ${req.method} ${req.originalUrl}` });
+});
 
 // Jalankan Server
 app.listen(PORT, () => {

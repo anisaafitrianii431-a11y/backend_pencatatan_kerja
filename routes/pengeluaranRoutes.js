@@ -12,6 +12,7 @@ const {
   getKasList,
   tambahDanaKantor,
   deleteDanaKantor,
+  updateDanaKantor,
   getReimbursementList,
   bayarReimbursement,
   getRiwayatBayarReimbursement,
@@ -41,6 +42,7 @@ router.all('/', (req, res, next) => {
   if (action === 'verifikasi') return verifikasiPengeluaran(req, res);
   if (action === 'bayar_reimbursement') return bayarReimbursement(req, res);
   if (action === 'tambah_dana') return tambahDanaKantor(req, res);
+  if (action === 'update_kas' || action === 'edit_dana') return updateDanaKantor(req, res);
   if (action === 'tambah_pengembalian') return tambahPengembalianDana(req, res);
   if (action === 'verifikasi_pengembalian') return verifikasiPengembalianDana(req, res);
   if (action === 'create' || action === 'tambah_pengeluaran') return createPengeluaran(req, res);
@@ -61,6 +63,8 @@ router.get('/dana-kantor', getDanaKantor);
 router.get('/dana-tersedia', getDanaTersedia);
 router.get('/kas-list', getKasList);
 router.post('/dana-kantor', tambahDanaKantor);
+router.put('/dana-kantor/:id', updateDanaKantor);
+router.put('/kas-list/:id', updateDanaKantor);
 router.delete('/dana-kantor/:id', deleteDanaKantor);
 
 router.get('/pengembalian-dana', getPengembalianDana);
