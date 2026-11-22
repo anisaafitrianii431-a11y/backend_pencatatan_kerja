@@ -17,6 +17,12 @@ function getPeriode(req) {
   return req.query.periode || req.body?.periode || new Date().toISOString().slice(0, 7);
 }
 
+function getTargetKaryawanId(req) {
+  if (req.user?.peran === 'karyawan') return Number(req.user.id_karyawan) || null;
+  const requestedId = Number(req.query.id_karyawan || req.body?.id_karyawan);
+  return Number.isInteger(requestedId) && requestedId > 0 ? requestedId : null;
+}
+
 // 1. Dispatcher Utama / Rekap Penggajian Seluruh Karyawan (Admin)
 async function getRekapGaji(req, res) {
   try {
@@ -31,12 +37,19 @@ async function getRekapGaji(req, res) {
 
     const periode = getPeriode(req);
 
-    // Ambil seluruh karyawan
-    const [karyawanList] = await db.query(`
+    // Karyawan hanya menerima slip miliknya sendiri; admin dapat memfilter atau melihat semua.
+    const targetKaryawanId = getTargetKaryawanId(req);
+    let karyawanQuery = `
       SELECT id_karyawan, kode_karyawan, nama, jabatan, jenis_upah, nominal_upah, tarif_per_jam, status
       FROM karyawan
-      ORDER BY id_karyawan ASC
-    `);
+    `;
+    const karyawanParams = [];
+    if (targetKaryawanId) {
+      karyawanQuery += ' WHERE id_karyawan = ?';
+      karyawanParams.push(targetKaryawanId);
+    }
+    karyawanQuery += ' ORDER BY id_karyawan ASC';
+    const [karyawanList] = await db.query(karyawanQuery, karyawanParams);
 
     // Ambil data penetapan gaji yang sudah tersimpan di database untuk periode ini
     const [savedGajiList] = await db.query('SELECT * FROM gaji WHERE periode = ?', [periode]);
@@ -158,7 +171,7 @@ async function kalkulasiGaji(req, res) {
 // 3. Detail Sesi Jam Kerja & Breakdown Penggajian Seorang Karyawan
 async function getDetailGaji(req, res) {
   try {
-    const id_karyawan = req.query.id_karyawan || req.user?.id_karyawan;
+    const id_karyawan = getTargetKaryawanId(req);
     const periode = getPeriode(req);
 
     if (!id_karyawan) {
@@ -447,6 +460,12 @@ async function getPembayaranList(req, res) {
     `;
     const params = [periode];
 
+    const targetKaryawanId = getTargetKaryawanId(req);
+    if (targetKaryawanId) {
+      query += ' AND g.id_karyawan = ?';
+      params.push(targetKaryawanId);
+    }
+
     if (status_bayar && status_bayar !== 'semua') {
       query += ` AND g.status_bayar = ? `;
       params.push(status_bayar);
@@ -465,7 +484,17 @@ async function getPembayaranList(req, res) {
 async function getPembayaranHistory(req, res) {
   try {
     const id_gaji = req.params.id || req.query.id_gaji;
-    const [rows] = await db.query('SELECT * FROM pembayaran_gaji WHERE id_gaji = ? ORDER BY id_pembayaran DESC', [id_gaji]);
+    const targetKaryawanId = getTargetKaryawanId(req);
+    let query = 'SELECT pg.* FROM pembayaran_gaji pg';
+    const params = [id_gaji];
+    if (targetKaryawanId) {
+      query += ' JOIN gaji g ON g.id_gaji = pg.id_gaji WHERE pg.id_gaji = ? AND g.id_karyawan = ?';
+      params.push(targetKaryawanId);
+    } else {
+      query += ' WHERE pg.id_gaji = ?';
+    }
+    query += ' ORDER BY pg.id_pembayaran DESC';
+    const [rows] = await db.query(query, params);
     return res.json({ success: true, data: rows });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
@@ -476,12 +505,19 @@ async function getPembayaranHistory(req, res) {
 async function getSlipGaji(req, res) {
   try {
     const id_gaji = req.params.id || req.query.id_gaji;
-    const [gRows] = await db.query(`
+    const targetKaryawanId = getTargetKaryawanId(req);
+    let query = `
       SELECT g.*, k.nama, k.kode_karyawan, k.jabatan, k.email
       FROM gaji g
       JOIN karyawan k ON g.id_karyawan = k.id_karyawan
       WHERE g.id_gaji = ?
-    `, [id_gaji]);
+    `;
+    const params = [id_gaji];
+    if (targetKaryawanId) {
+      query += ' AND g.id_karyawan = ?';
+      params.push(targetKaryawanId);
+    }
+    const [gRows] = await db.query(query, params);
 
     if (gRows.length === 0) {
       return res.status(404).json({ success: false, message: 'Data slip gaji tidak ditemukan' });
@@ -519,7 +555,7 @@ async function getSlipGaji(req, res) {
 // 10. Riwayat Slip Gaji Karyawan (Arsip Riwayat Penggajian Pribadi)
 async function getRiwayatGaji(req, res) {
   try {
-    const id_karyawan = req.user?.id_karyawan || req.query.id_karyawan;
+    const id_karyawan = getTargetKaryawanId(req);
     if (!id_karyawan) {
       return res.status(400).json({ success: false, message: 'ID Karyawan tidak valid' });
     }

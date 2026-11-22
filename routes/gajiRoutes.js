@@ -13,7 +13,7 @@ const {
   getRiwayatGaji
 } = require('../controllers/gajiController');
 
-// Dispatcher untuk root kompatibilitas /api/gaji dan /api/gaji.php?action=...
+// Dispatcher endpoint aksi gaji pada Express.
 router.all('/', (req, res, next) => {
   const action = req.query.action || req.body?.action;
 

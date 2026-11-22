@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const { isAdminRole } = require('../utils/roles');
 
 const sqlDurasi = `
   CASE 
@@ -176,8 +177,56 @@ async function deletePenugasan(req, res) {
   }
 }
 
+async function getPenugasanById(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const [rows] = await db.query(`
+      SELECT pn.*, p.nama_pekerjaan, p.lokasi, p.tanggal_mulai, p.target_selesai,
+             p.status AS status_pekerjaan, p.jenis_upah, p.nominal_upah,
+             k.nama AS nama_karyawan, k.kode_karyawan, k.jabatan
+      FROM penugasan pn
+      LEFT JOIN pekerjaan p ON p.id_pekerjaan = pn.id_pekerjaan
+      LEFT JOIN karyawan k ON k.id_karyawan = pn.id_karyawan
+      WHERE pn.id_penugasan = ? LIMIT 1
+    `, [id]);
+    if (!rows.length) return res.status(404).json({ success: false, message: 'Penugasan tidak ditemukan.' });
+    if (!isAdminRole(req.user?.peran) && Number(rows[0].id_karyawan) !== Number(req.user?.id_karyawan)) {
+      return res.status(403).json({ success: false, message: 'Akses penugasan ditolak.' });
+    }
+    return res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('Error getPenugasanById:', error);
+    return res.status(500).json({ success: false, message: 'Gagal memuat penugasan.' });
+  }
+}
+
+async function updatePenugasan(req, res) {
+  try {
+    const id = Number(req.params.id);
+    const idPekerjaan = Number(req.body.id_pekerjaan);
+    const idKaryawan = isAdminRole(req.user?.peran)
+      ? Number(req.body.id_karyawan)
+      : Number(req.user?.id_karyawan);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(idPekerjaan) || idPekerjaan <= 0 || !Number.isInteger(idKaryawan) || idKaryawan <= 0) {
+      return res.status(400).json({ success: false, message: 'Pekerjaan dan karyawan wajib dipilih.' });
+    }
+    const [result] = await db.query(
+      'UPDATE penugasan SET id_pekerjaan = ?, id_karyawan = ? WHERE id_penugasan = ?',
+      [idPekerjaan, idKaryawan, id]
+    );
+    if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Penugasan tidak ditemukan.' });
+    req.params.id = String(id);
+    return getPenugasanById(req, res);
+  } catch (error) {
+    console.error('Error updatePenugasan:', error);
+    return res.status(500).json({ success: false, message: 'Gagal memperbarui penugasan.' });
+  }
+}
+
 module.exports = {
   getAllPenugasan,
+  getPenugasanById,
   createPenugasan,
+  updatePenugasan,
   deletePenugasan
 };

@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const {
   getAllPenugasan,
+  getPenugasanById,
   createPenugasan,
+  updatePenugasan,
   deletePenugasan
 } = require('../controllers/penugasanController');
 
@@ -15,6 +17,8 @@ router.all('/', (req, res, next) => {
 
 router.post('/baca', createPenugasan);
 router.get('/notifikasi', getAllPenugasan);
+router.get('/:id', getPenugasanById);
+router.put('/:id', updatePenugasan);
 router.delete('/:id', deletePenugasan);
 
 module.exports = router;

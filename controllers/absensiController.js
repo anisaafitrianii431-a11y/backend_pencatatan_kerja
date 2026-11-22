@@ -1,5 +1,36 @@
 const db = require('../config/database');
 const { saveBase64Image } = require('../utils/uploadHelper');
+const { isAdminRole } = require('../utils/roles');
+
+function distanceMeters(lat1, lon1, lat2, lon2) {
+  const toRad = (value) => (value * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function validCoordinate(lat, lon) {
+  const latitude = Number(lat);
+  const longitude = Number(lon);
+  return Number.isFinite(latitude) && latitude >= -90 && latitude <= 90 &&
+    Number.isFinite(longitude) && longitude >= -180 && longitude <= 180
+    ? { latitude, longitude }
+    : null;
+}
+
+async function getAssignedRunningJob(idPekerjaan, idKaryawan) {
+  const [rows] = await db.query(`
+    SELECT p.id_pekerjaan, p.status, p.metode_lokasi, p.latitude, p.longitude,
+           p.radius_meter, p.lokasi
+    FROM pekerjaan p
+    JOIN penugasan pn ON pn.id_pekerjaan = p.id_pekerjaan
+    WHERE p.id_pekerjaan = ? AND pn.id_karyawan = ?
+      AND (pn.status_penugasan IS NULL OR pn.status_penugasan = 'aktif')
+    LIMIT 1
+  `, [idPekerjaan, idKaryawan]);
+  return rows[0] || null;
+}
 
 // Rumus SQL Durasi Jam Kerja (Mendukung Shift Malam yang lewat tengah malam)
 const sqlDurasi = `
@@ -141,6 +172,30 @@ async function getAllAbsensi(req, res) {
   }
 }
 
+async function getAbsensiById(req, res) {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: 'ID absensi tidak valid.' });
+    }
+    const [rows] = await db.query(`
+      SELECT a.*, k.nama AS nama_karyawan, p.nama_pekerjaan
+      FROM absensi a
+      LEFT JOIN karyawan k ON k.id_karyawan = a.id_karyawan
+      LEFT JOIN pekerjaan p ON p.id_pekerjaan = a.id_pekerjaan
+      WHERE a.id_absensi = ? LIMIT 1
+    `, [id]);
+    if (!rows.length) return res.status(404).json({ success: false, message: 'Data absensi tidak ditemukan.' });
+    if (!isAdminRole(req.user?.peran) && Number(rows[0].id_karyawan) !== Number(req.user?.id_karyawan)) {
+      return res.status(403).json({ success: false, message: 'Akses absensi ditolak.' });
+    }
+    return res.json({ success: true, data: rows[0] });
+  } catch (error) {
+    console.error('Error getAbsensiById:', error);
+    return res.status(500).json({ success: false, message: 'Gagal memuat absensi.' });
+  }
+}
+
 // 2. Karyawan Melakukan Absen Masuk
 async function absenMasuk(req, res) {
   try {
@@ -158,7 +213,7 @@ async function absenMasuk(req, res) {
       catatan
     } = req.body;
 
-    const workerId = id_karyawan || req.user?.id_karyawan;
+    const workerId = Number(req.user?.id_karyawan);
 
     if (!id_pekerjaan || !workerId) {
       return res.status(400).json({
@@ -167,16 +222,46 @@ async function absenMasuk(req, res) {
       });
     }
 
+    const job = await getAssignedRunningJob(id_pekerjaan, workerId);
+    if (!job) {
+      return res.status(403).json({ success: false, message: 'Pekerjaan tidak ditugaskan kepada Anda.' });
+    }
+    if (job.status !== 'berjalan') {
+      return res.status(403).json({ success: false, message: 'Absensi hanya dapat dilakukan saat status pekerjaan berjalan.' });
+    }
+
+    const methodLocation = String(job.metode_lokasi || 'titik').toLowerCase();
+    const currentPoint = validCoordinate(masuk_latitude, masuk_longitude);
+    let measuredDistance = null;
+    if (methodLocation !== 'wfh') {
+      const targetPoint = validCoordinate(job.latitude, job.longitude);
+      if (!targetPoint) {
+        return res.status(409).json({ success: false, message: 'Admin belum menetapkan koordinat lokasi pekerjaan.' });
+      }
+      if (!currentPoint) {
+        return res.status(400).json({ success: false, message: 'Koordinat GPS Anda belum valid. Deteksi ulang lokasi.' });
+      }
+      measuredDistance = distanceMeters(targetPoint.latitude, targetPoint.longitude, currentPoint.latitude, currentPoint.longitude);
+      const radius = Math.max(10, Number(job.radius_meter) || 100);
+      if (measuredDistance > radius) {
+        return res.status(403).json({
+          success: false,
+          message: `Anda berada di luar radius pekerjaan (${Math.round(measuredDistance)} m dari batas ${radius} m).`,
+          data: { jarak_meter: Math.round(measuredDistance), radius_meter: radius },
+        });
+      }
+    }
+
     const { tanggal: today, jam: nowTime } = getJakartaNow();
-    const finalTanggal = req.body.tanggal || today;
-    const finalJamMasuk = req.body.jam_masuk || nowTime;
+    const finalTanggal = today;
+    const finalJamMasuk = nowTime;
 
     // Simpan foto base64 ke disk jika ada
     const rawPhoto = foto_masuk || foto_lokasi || null;
     const fotoSaved = saveBase64Image(rawPhoto, 'absensi', 'absensi_masuk_');
 
-    const finalTitikLokasi = titik_lokasi || (masuk_latitude && masuk_longitude ? `${masuk_latitude}, ${masuk_longitude}` : null);
-    const jarak = jarak_masuk !== undefined ? Number(jarak_masuk) : (jarak_meter !== undefined ? Number(jarak_meter) : 0);
+    const finalTitikLokasi = currentPoint ? `${currentPoint.latitude}, ${currentPoint.longitude}` : (titik_lokasi || null);
+    const jarak = measuredDistance;
 
     // Cek apakah hari ini sudah absen masuk untuk pekerjaan yang sama dan belum pulang
     const [existing] = await db.query(
@@ -198,7 +283,7 @@ async function absenMasuk(req, res) {
       [
         id_pekerjaan, workerId, finalTanggal, finalJamMasuk,
         fotoSaved, fotoSaved,
-        masuk_latitude || null, masuk_longitude || null, masuk_alamat || null,
+        currentPoint?.latitude ?? null, currentPoint?.longitude ?? null, masuk_alamat || null,
         finalTitikLokasi,
         jarak, jarak, catatan || null
       ]
@@ -230,7 +315,7 @@ async function absenMasuk(req, res) {
 async function absenPulang(req, res) {
   try {
     let id = req.params.id || req.body.id_absensi || req.body.id || req.query.id_absensi;
-    const workerId = req.user?.id_karyawan || req.body.id_karyawan;
+    const workerId = Number(req.user?.id_karyawan);
 
     // Jika id tidak dikirim eksplisit, cari sesi aktif yang belum pulang hari ini
     if (!id && workerId) {
@@ -251,17 +336,17 @@ async function absenPulang(req, res) {
     }
 
     const { jam: nowTimeJakarta, tanggal: todayJakarta } = getJakartaNow();
-    const finalJamPulang = req.body.jam_pulang || nowTimeJakarta;
+    const finalJamPulang = nowTimeJakarta;
 
     // Simpan foto bukti kamera pulang jika base64
     const rawPhoto = req.body.foto_pulang || req.body.foto_lokasi || null;
     const fotoSaved = saveBase64Image(rawPhoto, 'absensi', 'absensi_pulang_');
 
-    const titikPulang = req.body.titik_pulang || req.body.titik_lokasi || (req.body.pulang_latitude && req.body.pulang_longitude ? `${req.body.pulang_latitude}, ${req.body.pulang_longitude}` : null);
-    const jarakPulang = req.body.jarak_pulang !== undefined ? Number(req.body.jarak_pulang) : (req.body.jarak_meter !== undefined ? Number(req.body.jarak_meter) : null);
+    let titikPulang = null;
+    let jarakPulang = null;
 
     // Ambil data absensi masuk untuk validasi durasi
-    const [absRows] = await db.query('SELECT * FROM absensi WHERE id_absensi = ?', [id]);
+    const [absRows] = await db.query('SELECT * FROM absensi WHERE id_absensi = ? AND id_karyawan = ?', [id, workerId]);
     if (absRows.length === 0) {
       return res.status(404).json({
         success: false,
@@ -270,7 +355,28 @@ async function absenPulang(req, res) {
     }
 
     const curr = absRows[0];
-    const isOvernight = Boolean(req.body.is_overnight);
+    if (curr.jam_pulang) return res.status(409).json({ success: false, message: 'Sesi kerja ini sudah ditutup.' });
+
+    const [jobRows] = await db.query(`SELECT id_pekerjaan, metode_lokasi, latitude, longitude, radius_meter
+      FROM pekerjaan WHERE id_pekerjaan = ? LIMIT 1`, [curr.id_pekerjaan]);
+    const job = jobRows[0];
+    if (!job) return res.status(403).json({ success: false, message: 'Pekerjaan tidak ditugaskan kepada Anda.' });
+    const methodLocation = String(job.metode_lokasi || 'titik').toLowerCase();
+    const currentPoint = validCoordinate(req.body.pulang_latitude ?? req.body.latitude, req.body.pulang_longitude ?? req.body.longitude);
+    if (methodLocation !== 'wfh') {
+      const targetPoint = validCoordinate(job.latitude, job.longitude);
+      if (!targetPoint) return res.status(409).json({ success: false, message: 'Koordinat lokasi pekerjaan belum tersedia.' });
+      if (!currentPoint) return res.status(400).json({ success: false, message: 'Koordinat GPS saat pulang tidak valid.' });
+      jarakPulang = distanceMeters(targetPoint.latitude, targetPoint.longitude, currentPoint.latitude, currentPoint.longitude);
+      const radius = Math.max(10, Number(job.radius_meter) || 100);
+      if (jarakPulang > radius) {
+        return res.status(403).json({ success: false, message: `Anda berada di luar radius pekerjaan (${Math.round(jarakPulang)} m dari batas ${radius} m).` });
+      }
+    } else if (!currentPoint) {
+      // Titik lokasi WFH opsional, tetapi bila dikirim harus tetap valid.
+      titikPulang = req.body.titik_pulang || req.body.titik_lokasi || null;
+    }
+    if (currentPoint) titikPulang = `${currentPoint.latitude}, ${currentPoint.longitude}`;
 
     // Hitung durasi jam
     let durasiJam = 0;
@@ -280,7 +386,7 @@ async function absenPulang(req, res) {
       const [h2, m2, s2 = 0] = String(finalJamPulang).split(':').map(Number);
       let sec1 = h1 * 3600 + m1 * 60 + s1;
       let sec2 = h2 * 3600 + m2 * 60 + s2;
-      if (isOvernight && sec2 < sec1) {
+      if (sec2 < sec1) {
         sec2 += 86400;
       }
       const diffSec = Math.max(0, sec2 - sec1);
@@ -304,8 +410,8 @@ async function absenPulang(req, res) {
         finalJamPulang,
         fotoSaved,
         titikPulang,
-        req.body.pulang_latitude || null,
-        req.body.pulang_longitude || null,
+        currentPoint?.latitude ?? null,
+        currentPoint?.longitude ?? null,
         req.body.pulang_alamat || null,
         jarakPulang,
         id
@@ -381,6 +487,7 @@ async function verifikasiAbsensi(req, res) {
 
 module.exports = {
   getAllAbsensi,
+  getAbsensiById,
   absenMasuk,
   absenPulang,
   verifikasiAbsensi

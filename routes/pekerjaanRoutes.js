@@ -19,7 +19,7 @@ const {
   tolakPekerjaanLaporan
 } = require('../controllers/pekerjaanController');
 
-// Dispatcher root untuk kompatibilitas /api/pekerjaan dan /api/pekerjaan.php
+// Dispatcher endpoint pekerjaan pada Express.
 router.all('/', (req, res, next) => {
   const action = req.query.action || req.body?.action;
   const rawId = req.query.id_pekerjaan;

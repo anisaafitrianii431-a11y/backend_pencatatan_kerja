@@ -7,7 +7,7 @@ const {
   toggleStatus
 } = require('../controllers/userController');
 
-// Helper untuk kompatibilitas /users.php?action=... atau REST /users/:id
+// REST users endpoint.
 router.all('/', (req, res) => {
   const action = req.query.action;
   const id = req.query.id_user;

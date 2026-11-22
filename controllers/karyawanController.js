@@ -1,4 +1,5 @@
 const db = require('../config/database');
+const bcrypt = require('bcryptjs');
 
 // 1. Ambil Semua Data Karyawan
 async function getAllKaryawan(req, res) {
@@ -24,6 +25,34 @@ async function getAllKaryawan(req, res) {
       message: 'Gagal mengambil data karyawan',
       error: error.message
     });
+  }
+}
+
+async function getMyKaryawan(req, res) {
+  try {
+    const idKaryawan = Number(req.user?.id_karyawan);
+    if (!Number.isInteger(idKaryawan) || idKaryawan <= 0) {
+      return res.status(404).json({ success: false, message: 'Profil karyawan tidak ditemukan.' });
+    }
+
+    const [rows] = await db.query(`
+      SELECT k.*, u.id_user, u.username, u.kode_user, u.aktif AS user_aktif,
+             COALESCE(k.nomor_hp, k.no_hp) AS nomor_telepon,
+             COALESCE(k.nominal_upah, k.tarif_per_jam, 0) AS upah_aktif
+      FROM karyawan k
+      LEFT JOIN user u ON u.id_karyawan = k.id_karyawan
+      WHERE k.id_karyawan = ?
+      LIMIT 1
+    `, [idKaryawan]);
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Profil karyawan tidak ditemukan.' });
+    }
+
+    return res.json({ success: true, message: 'Profil karyawan berhasil dimuat.', data: rows[0] });
+  } catch (error) {
+    console.error('Error getMyKaryawan:', error);
+    return res.status(500).json({ success: false, message: 'Gagal memuat profil karyawan.' });
   }
 }
 
@@ -55,58 +84,59 @@ async function getKaryawanById(req, res) {
 
 // 3. Tambah Karyawan Baru
 async function createKaryawan(req, res) {
+  const nama = String(req.body.nama || '').trim();
+  const password = String(req.body.kata_sandi || '');
+  const confirmPassword = String(req.body.konfirmasi_kata_sandi || '');
+  const jenisUpah = ['per_jam', 'per_hari', 'per_bulan'].includes(req.body.jenis_upah)
+    ? req.body.jenis_upah : 'per_jam';
+  const nominalUpah = Number(req.body.nominal_upah ?? req.body.tarif_per_jam ?? 0);
+  if (nama.length < 2 || nama.length > 100 || password.length < 6 || password !== confirmPassword || !Number.isFinite(nominalUpah) || nominalUpah < 0) {
+    return res.status(400).json({ success: false, message: 'Nama, upah, dan kata sandi valid wajib diisi. Konfirmasi kata sandi harus sama.' });
+  }
+
+  const kode = String(req.body.kode_karyawan || '').trim();
+  if (!kode) return res.status(400).json({ success: false, message: 'Kode karyawan wajib diisi.' });
+  const email = String(req.body.email || `${kode.toLowerCase()}@jamkerja.local`).trim().toLowerCase();
+  const phone = String(req.body.nomor_hp || req.body.no_hp || '').trim() || null;
+  const connection = await db.getConnection();
   try {
-    const { 
-      nama, 
-      jabatan, 
-      email, 
-      nomor_hp, 
-      no_hp,
-      jenis_upah = 'per_jam', 
-      nominal_upah = 0,
-      tarif_per_jam = 0,
-      alamat, 
-      status = 'aktif' 
-    } = req.body;
-
-    if (!nama) {
-      return res.status(400).json({
-        success: false,
-        message: 'Nama karyawan wajib diisi'
-      });
-    }
-
-    // Buat kode karyawan otomatis (contoh: KRY-014) jika tidak dikirim
-    const [countRows] = await db.query('SELECT COUNT(*) AS total FROM karyawan');
-    const nextNum = (countRows[0].total || 0) + 1;
-    const kode_karyawan = req.body.kode_karyawan || `KRY-${String(nextNum).padStart(3, '0')}`;
-    const hp = nomor_hp || no_hp || '';
-    const tarif = nominal_upah || tarif_per_jam || 0;
-
-    const [result] = await db.query(
-      `INSERT INTO karyawan 
-        (kode_karyawan, nama, jabatan, email, nomor_hp, no_hp, jenis_upah, nominal_upah, tarif_per_jam, alamat, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [kode_karyawan, nama, jabatan || 'Teknisi', email || null, hp, hp, jenis_upah, tarif, tarif, alamat || null, status]
+    await connection.beginTransaction();
+    const [duplicates] = await connection.query(
+      'SELECT id_karyawan FROM karyawan WHERE kode_karyawan = ? LIMIT 1', [kode]
     );
-
-    return res.status(201).json({
-      success: true,
-      message: 'Karyawan berhasil ditambahkan',
-      data: {
-        id_karyawan: result.insertId,
-        kode_karyawan,
-        nama,
-        jabatan
-      }
-    });
+    if (duplicates.length) {
+      await connection.rollback();
+      return res.status(409).json({ success: false, message: `Kode karyawan ${kode} sudah digunakan.` });
+    }
+    const [employeeResult] = await connection.query(
+      `INSERT INTO karyawan
+        (kode_karyawan, nama, jabatan, email, nomor_hp, no_hp, jenis_upah, nominal_upah,
+         tarif_per_jam, lembur_aktif, tarif_lembur, catatan_admin, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [kode, nama, req.body.jabatan || null, email, phone, phone, jenisUpah, nominalUpah,
+        jenisUpah === 'per_jam' ? nominalUpah : 0, req.body.lembur_aktif ? 1 : 0,
+        Number(req.body.tarif_lembur) || 0, req.body.catatan_admin || null,
+        req.body.status === 'nonaktif' ? 'nonaktif' : 'aktif']
+    );
+    const passwordHash = await bcrypt.hash(password, 12);
+    await connection.query(
+      `INSERT INTO \`user\` (kode_user, id_karyawan, username, email, kata_sandi, peran, aktif)
+       VALUES (?, ?, ?, ?, ?, 'karyawan', ?)`,
+      [kode, employeeResult.insertId, kode, email, passwordHash, req.body.status === 'nonaktif' ? 0 : 1]
+    );
+    await connection.commit();
+    const [rows] = await db.query(`
+      SELECT k.*, u.id_user, u.aktif AS user_aktif, u.username, u.kode_user
+      FROM karyawan k LEFT JOIN \`user\` u ON u.id_karyawan = k.id_karyawan
+      WHERE k.id_karyawan = ? LIMIT 1
+    `, [employeeResult.insertId]);
+    return res.status(201).json({ success: true, message: 'Karyawan dan akun login berhasil dibuat.', data: rows[0] });
   } catch (error) {
+    await connection.rollback();
     console.error('Error createKaryawan:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal menambahkan karyawan',
-      error: error.message
-    });
+    return res.status(500).json({ success: false, message: 'Gagal menambahkan karyawan.' });
+  } finally {
+    connection.release();
   }
 }
 
@@ -180,6 +210,7 @@ async function deleteKaryawan(req, res) {
 
 module.exports = {
   getAllKaryawan,
+  getMyKaryawan,
   getKaryawanById,
   createKaryawan,
   updateKaryawan,

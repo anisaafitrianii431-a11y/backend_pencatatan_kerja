@@ -160,6 +160,16 @@ async function getPekerjaanById(req, res, targetId = null) {
       return res.status(400).json({ success: false, message: 'ID Pekerjaan tidak valid' });
     }
 
+    if (req.user?.peran === 'karyawan' && req.user?.id_karyawan) {
+      const [assigned] = await db.query(`
+        SELECT id_penugasan FROM penugasan
+        WHERE id_pekerjaan = ? AND id_karyawan = ?
+          AND (status_penugasan IS NULL OR status_penugasan = 'aktif')
+        LIMIT 1
+      `, [id, req.user.id_karyawan]);
+      if (!assigned.length) return res.status(403).json({ success: false, message: 'Pekerjaan ini tidak ditugaskan kepada akun Anda.' });
+    }
+
     const [rows] = await db.query(`
       SELECT p.*,
         (SELECT COUNT(DISTINCT pn.id_karyawan) FROM penugasan pn WHERE pn.id_pekerjaan = p.id_pekerjaan AND (pn.status_penugasan IS NULL OR pn.status_penugasan = 'aktif')) AS total_pekerja,

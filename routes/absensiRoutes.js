@@ -2,12 +2,13 @@ const express = require('express');
 const router = express.Router();
 const {
   getAllAbsensi,
+  getAbsensiById,
   absenMasuk,
   absenPulang,
   verifikasiAbsensi
 } = require('../controllers/absensiController');
 
-// Dispatcher untuk rute root (mendukung /api/absensi dan /api/absensi.php?action=...)
+// Dispatcher endpoint aksi absensi pada Express.
 router.all('/', (req, res, next) => {
   const action = req.query.action || req.body?.action;
   if (action === 'masuk') return absenMasuk(req, res);
@@ -24,6 +25,7 @@ router.post('/pulang', absenPulang);
 router.put('/pulang', absenPulang);
 router.post('/verifikasi', verifikasiAbsensi);
 router.put('/verifikasi', verifikasiAbsensi);
+router.get('/:id', getAbsensiById);
 
 router.put('/:id/pulang', absenPulang);
 router.post('/:id/pulang', absenPulang);

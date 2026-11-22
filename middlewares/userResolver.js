@@ -1,103 +1,89 @@
 const jwt = require('jsonwebtoken');
 const db = require('../config/database');
+const { getRolePermissionsMap } = require('../config/defaultRolePermissions');
 
-/**
- * Middleware untuk mengekstrak identitas pengguna dari:
- * 1. Header Authorization (Bearer JWT atau Bearer <userId>)
- * 2. Header X-User-Id & X-User-Role dari React safeFetchJson
- * 3. Body atau Query id_karyawan / user_id
- */
+const AUTH_COOKIE = 'pencatatan_auth';
+
+function isPublicRequest(req) {
+  if (req.path === '/api/health') return true;
+  if (req.path.startsWith('/uploads/') || req.path.startsWith('/api/uploads/')) return true;
+  if (req.path === '/api/auth/ping' || req.path === '/api/auth/ntp-time') return true;
+  if (req.path === '/api/auth/login' && req.method === 'POST') return true;
+  if (req.path === '/api/auth/register' && req.method === 'POST') return true;
+
+  return false;
+}
+
+function readToken(req) {
+  const authorization = String(req.headers.authorization || '');
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i);
+  if (bearer) return bearer[1].trim();
+
+  const cookieHeader = String(req.headers.cookie || '');
+  const cookie = cookieHeader.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${AUTH_COOKIE}=`));
+  return cookie ? decodeURIComponent(cookie.slice(AUTH_COOKIE.length + 1)) : '';
+}
+
 async function userResolver(req, res, next) {
+  if (isPublicRequest(req)) return next();
+
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret.length < 32) {
+    return res.status(503).json({ success: false, message: 'Konfigurasi autentikasi backend belum lengkap.' });
+  }
+
+  const token = readToken(req);
+  if (!token) return res.status(401).json({ success: false, message: 'Silakan login untuk melanjutkan.' });
+
   try {
-    const authHeader = req.headers['authorization'] || req.headers['x-user-id'];
-    const roleHeader = req.headers['x-user-role'];
-    let userId = null;
-
-    if (authHeader) {
-      if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
-        const tokenOrId = authHeader.substring(7).trim();
-        if (/^\d+$/.test(tokenOrId)) {
-          userId = parseInt(tokenOrId, 10);
-        } else {
-          try {
-            const decoded = jwt.verify(tokenOrId, process.env.JWT_SECRET || 'rahasia_kunci_jwt_12345');
-            req.user = decoded;
-            return next();
-          } catch (e) {
-            // Token JWT mungkin kedaluwarsa atau dikirim ID biasa
-          }
-        }
-      } else if (/^\d+$/.test(String(authHeader).trim())) {
-        userId = parseInt(String(authHeader).trim(), 10);
-      }
+    const claims = jwt.verify(token, secret);
+    const userId = Number(claims.id_user || claims.sub);
+    if (!Number.isInteger(userId) || userId <= 0) {
+      return res.status(401).json({ success: false, message: 'Sesi login tidak valid.' });
     }
 
-    if (!userId && req.headers['x-user-id'] && /^\d+$/.test(String(req.headers['x-user-id']))) {
-      userId = parseInt(req.headers['x-user-id'], 10);
+    const [rows] = await db.query(`
+      SELECT u.id_user, u.id_karyawan, u.email, u.username, u.peran, u.aktif,
+             k.kode_karyawan, k.nama, k.jabatan, k.tarif_per_jam, k.nominal_upah,
+             k.jenis_upah, k.status AS status_karyawan
+      FROM user u
+      LEFT JOIN karyawan k ON k.id_karyawan = u.id_karyawan
+      WHERE u.id_user = ? AND u.aktif = 1
+      LIMIT 1
+    `, [userId]);
+
+    const account = rows[0];
+    if (!account || (account.peran === 'karyawan' && account.status_karyawan && account.status_karyawan !== 'aktif')) {
+      return res.status(401).json({ success: false, message: 'Akun tidak aktif atau sesi sudah berakhir.' });
     }
 
-    // Fallback Admin jika terindikasi dari header peran atau ID 1
-    if (roleHeader === 'admin' || userId === 1) {
-      req.user = {
-        id: 1,
-        id_user: 1,
-        id_karyawan: null,
-        peran: 'admin',
-        role: 'admin',
-        nama: 'Administrator',
-        email: 'admin@jamkerja.com'
-      };
-      return next();
+    const permissions = await getRolePermissionsMap(account.peran, db);
+
+    req.user = {
+      id: account.id_karyawan || account.id_user,
+      id_user: Number(account.id_user),
+      id_karyawan: account.id_karyawan ? Number(account.id_karyawan) : null,
+      peran: account.peran,
+      role: account.peran,
+      username: account.username || '',
+      kode_karyawan: account.kode_karyawan || '',
+      nama: account.nama || account.username || account.email,
+      email: account.email,
+      jabatan: account.jabatan || '',
+      tarif_per_jam: Number(account.tarif_per_jam || account.nominal_upah) || 0,
+      nominal_upah: Number(account.nominal_upah) || 0,
+      jenis_upah: account.jenis_upah || 'per_jam',
+      permissions,
+    };
+
+    return next();
+  } catch (error) {
+    if (error.name === 'TokenExpiredError' || error.name === 'JsonWebTokenError') {
+      return res.status(401).json({ success: false, message: 'Sesi login tidak valid atau sudah berakhir.' });
     }
-
-    // Query user dari database jika ada userId
-    if (userId) {
-      const [rows] = await db.query(`
-        SELECT 
-          u.id_user,
-          u.username,
-          u.email,
-          u.peran,
-          u.aktif,
-          k.id_karyawan,
-          k.kode_karyawan,
-          k.nama,
-          k.jabatan,
-          k.nominal_upah,
-          k.tarif_per_jam,
-          k.jenis_upah
-        FROM user u
-        LEFT JOIN karyawan k ON u.id_karyawan = k.id_karyawan
-        WHERE u.id_user = ? OR k.id_karyawan = ?
-        LIMIT 1
-      `, [userId, userId]);
-
-      if (rows.length > 0) {
-        const row = rows[0];
-        req.user = {
-          id: row.id_karyawan || row.id_user,
-          id_user: row.id_user,
-          id_karyawan: row.id_karyawan,
-          peran: row.peran || 'karyawan',
-          role: row.peran || 'karyawan',
-          kode_karyawan: row.kode_karyawan || row.username,
-          nama: row.nama || row.username,
-          email: row.email,
-          jabatan: row.jabatan || 'Teknisi',
-          jenis_upah: row.jenis_upah || 'per_jam',
-          tarif_per_jam: Number(row.tarif_per_jam || row.nominal_upah) || 0,
-          nominal_upah: Number(row.nominal_upah) || 0
-        };
-        return next();
-      }
-    }
-
-    // Default jika tidak ada header
-    next();
-  } catch (err) {
-    console.error('Error in userResolver middleware:', err);
-    next();
+    console.error('Gagal memvalidasi sesi:', error);
+    return res.status(500).json({ success: false, message: 'Gagal memvalidasi akun.' });
   }
 }
 
-module.exports = userResolver;
+module.exports = { userResolver, AUTH_COOKIE };

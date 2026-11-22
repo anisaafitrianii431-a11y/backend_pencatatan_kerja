@@ -1,5 +1,6 @@
 const db = require('../config/database');
 const { saveBase64Image } = require('../utils/uploadHelper');
+const { isAdminRole } = require('../utils/roles');
 
 // 1. Ambil Semua Data Pengeluaran / Dispatcher Berdasarkan Query Action
 async function getAllPengeluaran(req, res) {
@@ -183,13 +184,13 @@ async function createPengeluaran(req, res) {
       id_penanggung_jawab = null,
       keterangan = '',
       foto_kwitansi = '',
-      foto_nota = '',
-      status_verifikasi = 'menunggu'
+      foto_nota = ''
     } = req.body;
+    const status_verifikasi = isAdminRole(req.user?.peran) ? (req.body.status_verifikasi || 'menunggu') : 'menunggu';
 
     // Resolusi Karyawan yang aman (tidak terpengaruh string "undefined" atau "null")
-    let workerId = null;
-    if (id_karyawan && !isNaN(parseInt(id_karyawan, 10)) && parseInt(id_karyawan, 10) > 0) {
+    let workerId = req.user?.peran === 'karyawan' ? Number(req.user.id_karyawan) : null;
+    if (!workerId && id_karyawan && !isNaN(parseInt(id_karyawan, 10)) && parseInt(id_karyawan, 10) > 0) {
       workerId = parseInt(id_karyawan, 10);
     } else if (req.user?.id_karyawan && !isNaN(parseInt(req.user.id_karyawan, 10)) && parseInt(req.user.id_karyawan, 10) > 0) {
       workerId = parseInt(req.user.id_karyawan, 10);
@@ -214,7 +215,19 @@ async function createPengeluaran(req, res) {
     if (id_pekerjaan && !isNaN(parseInt(id_pekerjaan, 10)) && parseInt(id_pekerjaan, 10) > 0) {
       jobId = parseInt(id_pekerjaan, 10);
     }
-    if (!jobId && workerId) {
+    if (req.user?.peran === 'karyawan') {
+      if (!jobId) return res.status(400).json({ success: false, message: 'Pilih pekerjaan untuk mencatat pengeluaran.' });
+      const [assignments] = await db.query(`
+        SELECT pn.id_penugasan
+        FROM penugasan pn
+        JOIN pekerjaan p ON p.id_pekerjaan = pn.id_pekerjaan
+        WHERE pn.id_karyawan = ? AND pn.id_pekerjaan = ?
+          AND (pn.status_penugasan IS NULL OR pn.status_penugasan = 'aktif')
+          AND p.status = 'berjalan'
+        LIMIT 1
+      `, [workerId, jobId]);
+      if (!assignments.length) return res.status(403).json({ success: false, message: 'Pengeluaran hanya dapat dicatat untuk pekerjaan berjalan yang ditugaskan kepada Anda.' });
+    } else if (!jobId && workerId) {
       const [pRows] = await db.query('SELECT id_pekerjaan FROM penugasan WHERE id_karyawan = ? AND status_penugasan = "aktif" LIMIT 1', [workerId]);
       if (pRows.length > 0) jobId = pRows[0].id_pekerjaan;
     }
@@ -265,10 +278,16 @@ async function createPengeluaran(req, res) {
     let pjId = null;
     if (jenis_dana === 'kantor') {
       danaId = (id_dana && !isNaN(parseInt(id_dana, 10))) ? parseInt(id_dana, 10) : null;
-      pjId = (id_penanggung_jawab && !isNaN(parseInt(id_penanggung_jawab, 10))) ? parseInt(id_penanggung_jawab, 10) : null;
+      pjId = req.user?.peran === 'karyawan' ? workerId : ((id_penanggung_jawab && !isNaN(parseInt(id_penanggung_jawab, 10))) ? parseInt(id_penanggung_jawab, 10) : null);
       if (danaId && !pjId) {
         const [dRows] = await db.query('SELECT id_penanggung_jawab FROM dana_kantor WHERE id_dana = ?', [danaId]);
         if (dRows.length > 0) pjId = dRows[0].id_penanggung_jawab;
+      }
+      if (req.user?.peran === 'karyawan') {
+        const [funds] = await db.query(`SELECT id_dana FROM dana_kantor
+          WHERE id_dana = ? AND id_penanggung_jawab = ? AND (id_pekerjaan IS NULL OR id_pekerjaan = ?)
+            AND status_verifikasi = 'disetujui' LIMIT 1`, [danaId, workerId, jobId]);
+        if (!funds.length) return res.status(403).json({ success: false, message: 'Dana kantor tersebut tidak tersedia untuk Anda atau pekerjaan ini.' });
       }
     }
 
@@ -322,6 +341,12 @@ async function updatePengeluaran(req, res) {
       return res.status(404).json({ success: false, message: 'Pengeluaran tidak ditemukan' });
     }
     const curr = currRows[0];
+    if (req.user?.peran === 'karyawan' && Number(curr.id_karyawan) !== Number(req.user.id_karyawan)) {
+      return res.status(403).json({ success: false, message: 'Anda hanya dapat mengubah pengeluaran milik Anda.' });
+    }
+    if (req.user?.peran === 'karyawan' && curr.status_verifikasi === 'disetujui') {
+      return res.status(403).json({ success: false, message: 'Pengeluaran yang sudah disetujui tidak dapat diubah.' });
+    }
 
     const {
       id_pekerjaan,
@@ -486,7 +511,7 @@ async function deletePengeluaran(req, res) {
 // 6. Data Kas & Dana Kantor (Tab 2: Pengelolaan Dana Operasional)
 async function getDanaKantor(req, res) {
   try {
-    const [rows] = await db.query(`
+    let query = `
       SELECT 
         dk.*,
         pj.nama AS nama_penanggung_jawab,
@@ -495,8 +520,14 @@ async function getDanaKantor(req, res) {
       FROM dana_kantor dk
       LEFT JOIN karyawan pj ON dk.id_penanggung_jawab = pj.id_karyawan
       LEFT JOIN pekerjaan pk ON dk.id_pekerjaan = pk.id_pekerjaan
-      ORDER BY dk.tanggal DESC, dk.id_dana DESC
-    `);
+    `;
+    const params = [];
+    if (!isAdminRole(req.user?.peran)) {
+      query += ' WHERE dk.id_penanggung_jawab = ? ';
+      params.push(req.user?.id_karyawan || 0);
+    }
+    query += ' ORDER BY dk.tanggal DESC, dk.id_dana DESC ';
+    const [rows] = await db.query(query, params);
 
     // Hitung terpakai dan sisa secara akurat untuk setiap baris transaksi
     const enriched = await Promise.all(rows.map(async (row) => {
@@ -884,6 +915,36 @@ async function deleteDanaKantor(req, res) {
   }
 }
 
+async function updateDanaKantor(req, res) {
+  try {
+    const id = Number(req.params.id || req.body?.id_dana || req.body?.id_kas);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ success: false, message: 'ID dana tidak valid.' });
+    const { tanggal, sumber_dana, pemberi_dana, penerima_dana, id_penanggung_jawab, id_pekerjaan, nominal, keterangan, tujuan_penggunaan, bukti_transaksi } = req.body;
+    const [result] = await db.query(`
+      UPDATE dana_kantor SET
+        tanggal = COALESCE(?, tanggal),
+        sumber_dana = COALESCE(?, sumber_dana),
+        pemberi_dana = COALESCE(?, pemberi_dana),
+        penerima_dana = COALESCE(?, penerima_dana),
+        id_penanggung_jawab = COALESCE(?, id_penanggung_jawab),
+        id_pekerjaan = COALESCE(?, id_pekerjaan),
+        nominal = COALESCE(?, nominal),
+        keterangan = COALESCE(?, keterangan),
+        tujuan_penggunaan = COALESCE(?, tujuan_penggunaan),
+        bukti_transaksi = COALESCE(?, bukti_transaksi)
+      WHERE id_dana = ?
+    `, [tanggal || null, sumber_dana || null, pemberi_dana || null, penerima_dana || null,
+      id_penanggung_jawab || null, id_pekerjaan || null,
+      nominal !== undefined && nominal !== '' ? Number(nominal) : null,
+      keterangan ?? null, tujuan_penggunaan ?? null, bukti_transaksi || null, id]);
+    if (!result.affectedRows) return res.status(404).json({ success: false, message: 'Transaksi dana tidak ditemukan.' });
+    return res.json({ success: true, message: 'Transaksi dana berhasil diperbarui.', data: { id_dana: id, id_kas: id } });
+  } catch (error) {
+    console.error('Error updateDanaKantor:', error);
+    return res.status(500).json({ success: false, message: 'Gagal memperbarui transaksi dana.' });
+  }
+}
+
 // 9. Daftar Klaim Reimbursement (Uang Pribadi)
 async function getReimbursementList(req, res) {
   try {
@@ -996,7 +1057,7 @@ async function getRiwayatBayarReimbursement(req, res) {
   try {
     const id = req.params.id || req.query.id_pengeluaran;
     const [rows] = await db.query(
-      'SELECT * FROM pembayaran_reimbursement WHERE id_pengeluaran = ? ORDER BY id_pembayaran_reimburse DESC',
+      'SELECT * FROM pembayaran_reimbursement WHERE id_pengeluaran = ? ORDER BY id_pembayaran DESC',
       [id]
     );
     return res.json({ success: true, data: rows });
@@ -1008,7 +1069,7 @@ async function getRiwayatBayarReimbursement(req, res) {
 // 12. Daftar Pengembalian Dana Kantor oleh Pekerja
 async function getPengembalianDana(req, res) {
   try {
-    const [rows] = await db.query(`
+    let query = `
       SELECT 
         pd.*,
         k.nama AS nama_karyawan,
@@ -1017,8 +1078,14 @@ async function getPengembalianDana(req, res) {
       FROM pengembalian_dana pd
       LEFT JOIN karyawan k ON pd.id_karyawan = k.id_karyawan
       LEFT JOIN karyawan pj ON pd.id_penanggung_jawab = pj.id_karyawan
-      ORDER BY pd.tanggal DESC, pd.id_pengembalian DESC
-    `);
+    `;
+    const params = [];
+    if (!isAdminRole(req.user?.peran)) {
+      query += ' WHERE pd.id_karyawan = ? OR pd.id_penanggung_jawab = ? ';
+      params.push(req.user?.id_karyawan || 0, req.user?.id_karyawan || 0);
+    }
+    query += ' ORDER BY pd.tanggal DESC, pd.id_pengembalian DESC ';
+    const [rows] = await db.query(query, params);
     return res.json({ success: true, data: rows });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
@@ -1192,6 +1259,7 @@ module.exports = {
   getKasList,
   tambahDanaKantor,
   deleteDanaKantor,
+  updateDanaKantor,
   getReimbursementList,
   bayarReimbursement,
   getRiwayatBayarReimbursement,
