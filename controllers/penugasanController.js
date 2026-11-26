@@ -332,32 +332,16 @@ async function createPenugasan(req, res) {
       const jKerja = Number(job.jam_kerja_per_hari || 8);
       const normMonthly = normalizeToMonthly(jenis_upah, Number(nominal_upah), hKerja, jKerja);
 
-      const minB = Number(prb.gaji_min_bulanan);
-      const maxB = Number(prb.gaji_max_bulanan);
-
-      if (normMonthly < minB || normMonthly > maxB) {
-        const allUnits = convertMonthlyRangeToAllUnits(minB, maxB, hKerja, jKerja);
-        const uRange = allUnits[jenis_upah];
-        const unitLabel = jenis_upah === 'per_jam' ? 'jam' : (jenis_upah === 'per_hari' ? 'hari' : (jenis_upah === 'per_bulan' ? 'bulan' : 'tahun'));
-
-        return res.status(400).json({
-          success: false,
-          message: `Tarif Rp ${Number(nominal_upah).toLocaleString('id-ID')}/${unitLabel} (setara Rp ${Number(normMonthly).toLocaleString('id-ID')}/bulan) berada di luar rentang role ${prb.nama_role}. Rentang diperbolehkan: Rp ${uRange.min.toLocaleString('id-ID')} – Rp ${uRange.max.toLocaleString('id-ID')} per ${unitLabel}.`,
-          rentang_diperbolehkan: uRange,
-          normalized_monthly: normMonthly
-        });
-      }
-
       // Simpan penugasan + riwayat gaji awal dalam transaksi
       connection = await db.getConnection();
       await connection.beginTransaction();
 
       const [insertPenugasan] = await connection.query(
         `INSERT INTO penugasan 
-          (id_pekerjaan, id_karyawan, peran_tugas, jenis_penugasan, status_penugasan, status_baca, id_role_budget, tanggal_penugasan, tanggal_selesai_tugas)
-         VALUES (?, ?, ?, ?, 'aktif', 'belum', ?, ?, ?)`,
+          (id_pekerjaan, id_karyawan, peran_tugas, jenis_upah, nominal_upah, jenis_penugasan, status_penugasan, status_baca, id_role_budget, tanggal_penugasan, tanggal_selesai_tugas)
+         VALUES (?, ?, ?, ?, ?, ?, 'aktif', 'belum', ?, ?, ?)`,
         [
-          id_pekerjaan, id_karyawan, prb.nama_role, jenis_penugasan,
+          id_pekerjaan, id_karyawan, prb.nama_role, jenis_upah, Number(nominal_upah), jenis_penugasan,
           id_role_budget, tanggal_penugasan || null, tanggal_selesai_tugas || null
         ]
       );
@@ -612,35 +596,6 @@ async function updatePenugasanGajiRiwayat(req, res) {
     const jKerja = Number(penugasan.jam_kerja_per_hari || 8);
     const normMonthly = normalizeToMonthly(jenis_upah, nominal, hKerja, jKerja);
 
-    // Jika penugasan terikat slot role budget, validasi batas min & max
-    if (penugasan.id_role_budget) {
-      const [rbRows] = await db.query(`
-        SELECT prb.*, mr.nama_role
-        FROM pekerjaan_role_budget prb
-        JOIN master_role mr ON prb.id_role = mr.id_role
-        WHERE prb.id_role_budget = ?
-      `, [penugasan.id_role_budget]);
-
-      if (rbRows.length > 0) {
-        const prb = rbRows[0];
-        const minB = Number(prb.gaji_min_bulanan);
-        const maxB = Number(prb.gaji_max_bulanan);
-
-        if (normMonthly < minB || normMonthly > maxB) {
-          const allUnits = convertMonthlyRangeToAllUnits(minB, maxB, hKerja, jKerja);
-          const uRange = allUnits[jenis_upah];
-          const unitLabel = jenis_upah === 'per_jam' ? 'jam' : (jenis_upah === 'per_hari' ? 'hari' : (jenis_upah === 'per_bulan' ? 'bulan' : 'tahun'));
-
-          return res.status(400).json({
-            success: false,
-            message: `Tarif baru Rp ${nominal.toLocaleString('id-ID')}/${unitLabel} (setara Rp ${normMonthly.toLocaleString('id-ID')}/bulan) berada di luar rentang role ${prb.nama_role}. Rentang diperbolehkan: Rp ${uRange.min.toLocaleString('id-ID')} – Rp ${uRange.max.toLocaleString('id-ID')} per ${unitLabel}.`,
-            rentang_diperbolehkan: uRange,
-            normalized_monthly: normMonthly
-          });
-        }
-      }
-    }
-
     // Jalankan pembaruan skema gaji dalam 1 transaksi
     connection = await db.getConnection();
     await connection.beginTransaction();
@@ -660,6 +615,12 @@ async function updatePenugasanGajiRiwayat(req, res) {
         (id_penugasan, jenis_upah, nominal_upah, normalized_monthly, effective_from, effective_to, catatan)
        VALUES (?, ?, ?, ?, ?, NULL, ?)`,
       [id, jenis_upah, nominal, normMonthly, newEffDateStr, catatan || 'Penyesuaian skema gaji']
+    );
+
+    // Sinkronkan juga ke tabel penugasan langsung
+    await connection.query(
+      'UPDATE penugasan SET jenis_upah = ?, nominal_upah = ? WHERE id_penugasan = ?',
+      [jenis_upah, nominal, id]
     );
 
     await connection.commit();

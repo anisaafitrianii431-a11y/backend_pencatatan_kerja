@@ -745,18 +745,6 @@ async function updatePekerjaan(req, res) {
             message: `Kuota slot untuk role "${eb.nama_role}" tidak boleh lebih kecil dari jumlah pekerja yang sudah terisi (${assignedList.length} pekerja).`
           });
         }
-
-        for (const w of assignedList) {
-          const normVal = Number(w.normalized_monthly || 0);
-          if (normVal < eb.gaji_min_bulanan || normVal > eb.gaji_max_bulanan) {
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({
-              success: false,
-              message: `Rentang gaji baru untuk role "${eb.nama_role}" (Rp ${eb.gaji_min_bulanan.toLocaleString('id-ID')} - Rp ${eb.gaji_max_bulanan.toLocaleString('id-ID')}) tidak mencakup gaji aktif pekerja "${w.nama}" (Rp ${normVal.toLocaleString('id-ID')}/bulan).`
-            });
-          }
-        }
       }
 
       // Hapus role budget lama yang tidak ada di daftar baru (hanya yang tidak punya pekerja)
@@ -1574,18 +1562,6 @@ async function updatePekerjaanBlueprint(req, res) {
           success: false,
           message: `Kuota slot untuk role "${eb.nama_role}" tidak boleh lebih kecil dari jumlah pekerja yang sudah terisi (${assignedList.length} pekerja).`
         });
-      }
-
-      for (const w of assignedList) {
-        const normVal = Number(w.normalized_monthly || 0);
-        if (normVal < eb.gaji_min_bulanan || normVal > eb.gaji_max_bulanan) {
-          await connection.rollback();
-          connection.release();
-          return res.status(400).json({
-            success: false,
-            message: `Rentang gaji baru untuk role "${eb.nama_role}" (Rp ${eb.gaji_min_bulanan.toLocaleString('id-ID')} - Rp ${eb.gaji_max_bulanan.toLocaleString('id-ID')}) tidak mencakup gaji aktif pekerja "${w.nama}" (Rp ${normVal.toLocaleString('id-ID')}/bulan).`
-          });
-        }
       }
     }
 

@@ -63,25 +63,27 @@ async function authorizeRequest(req, res, next) {
   const path = req.path.toLowerCase();
   const method = req.method.toUpperCase();
   const action = String(req.query?.action || req.body?.action || '').toLowerCase();
+  const userRole = String(user.peran || user.role || '').toLowerCase();
   
-  if (user.peran === 'super_admin') return next();
+  // Super Admin dan Admin memiliki hak akses penuh ke seluruh sistem
+  if (userRole === 'super_admin' || userRole === 'superadmin') return next();
+  if (isAdminRole(userRole)) return next();
+
   if (path === '/api/role-permissions/mine' && method === 'GET') return next();
   if (path === '/api/role-permissions' || path.startsWith('/api/role-permissions/')) return forbid(res);
 
   // Akses Master Role diperbolehkan untuk Admin & Super Admin
   if (path === '/api/master-role' || path.startsWith('/api/master-role/') || path === '/api/master_role' || path.startsWith('/api/master_role/')) {
-    if (isAdminRole(user.peran)) return next();
+    if (isAdminRole(userRole)) return next();
     return forbid(res);
   }
 
   const resource = getResource(path);
   const permissionAction = resource ? getPermissionAction(method, path, action) : null;
-  if (!['admin', 'karyawan'].includes(user.peran)) return forbid(res);
-  if (resource && (!permissionAction || !(await hasPermission(user.peran, resource, permissionAction)))) {
+  if (!['admin', 'karyawan'].includes(userRole)) return forbid(res);
+  if (resource && (!permissionAction || !(await hasPermission(userRole, resource, permissionAction)))) {
     return forbid(res);
   }
-
-  if (isAdminRole(user.peran)) return next();
 
   const workerId = Number(user.id_karyawan);
 
@@ -130,9 +132,16 @@ async function authorizeRequest(req, res, next) {
 
   if (path.includes('/absensi')) {
     if (method === 'GET') return next();
-    if (method === 'POST' && ['masuk', 'pulang'].includes(action)) return next();
-    if ((method === 'POST' || method === 'PUT') && /\/(masuk|pulang)\/?$/.test(path)) return next();
-    return forbid(res);
+
+    // Verifikasi absensi hanya diperbolehkan untuk Admin & Super Admin
+    const isVerifikasi =
+      action === 'verifikasi' ||
+      path.includes('/verifikasi') ||
+      Boolean(req.body && (req.body.status_verifikasi || req.body.status));
+    if (isVerifikasi) return forbid(res);
+
+    // Karyawan diizinkan melakukan proses absen masuk dan pulang
+    return next();
   }
 
   if (path.includes('/pengeluaran')) {

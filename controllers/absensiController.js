@@ -240,7 +240,17 @@ async function absenMasuk(req, res) {
       catatan
     } = req.body;
 
-    const workerId = id_karyawan || req.user?.id_karyawan;
+    let workerId = Number(id_karyawan || req.user?.id_karyawan);
+
+    if (!workerId && id_pekerjaan) {
+      const [assigned] = await db.query(
+        'SELECT id_karyawan FROM penugasan WHERE id_pekerjaan = ? ORDER BY id_penugasan ASC LIMIT 1',
+        [id_pekerjaan]
+      );
+      if (assigned.length > 0) {
+        workerId = Number(assigned[0].id_karyawan);
+      }
+    }
 
     if (!id_pekerjaan || !workerId) {
       return res.status(400).json({
@@ -351,17 +361,45 @@ async function absenMasuk(req, res) {
 // 3. Karyawan Melakukan Absen Pulang
 async function absenPulang(req, res) {
   try {
-    let id = req.params.id || req.body.id_absensi || req.body.id || req.query.id_absensi;
-    const workerId = req.user?.id_karyawan || req.body.id_karyawan;
+    let rawId = req.params.id || req.body.id_absensi || req.body.id || req.query.id_absensi;
+    let id = (rawId && rawId !== 'undefined' && rawId !== 'null') ? Number(rawId) : null;
+    let workerId = Number(req.user?.id_karyawan || req.body?.id_karyawan || req.query?.id_karyawan) || null;
+    const jobId = Number(req.body?.id_pekerjaan || req.query?.id_pekerjaan) || null;
 
-    // Jika id tidak dikirim eksplisit, cari sesi aktif yang belum pulang hari ini
-    if (!id && workerId) {
-      const [actives] = await db.query(
-        'SELECT id_absensi FROM absensi WHERE id_karyawan = ? AND jam_pulang IS NULL ORDER BY id_absensi DESC LIMIT 1',
-        [workerId]
-      );
-      if (actives.length > 0) {
-        id = actives[0].id_absensi;
+    // Jika id tidak dikirim eksplisit, cari sesi aktif yang belum pulang
+    if (!id) {
+      if (workerId && jobId) {
+        const [actives] = await db.query(
+          'SELECT id_absensi FROM absensi WHERE id_karyawan = ? AND id_pekerjaan = ? AND jam_pulang IS NULL ORDER BY id_absensi DESC LIMIT 1',
+          [workerId, jobId]
+        );
+        if (actives.length > 0) id = actives[0].id_absensi;
+      }
+      if (!id && workerId) {
+        const [actives] = await db.query(
+          'SELECT id_absensi FROM absensi WHERE id_karyawan = ? AND jam_pulang IS NULL ORDER BY id_absensi DESC LIMIT 1',
+          [workerId]
+        );
+        if (actives.length > 0) id = actives[0].id_absensi;
+      }
+      if (!id && jobId) {
+        const [actives] = await db.query(
+          'SELECT id_absensi, id_karyawan FROM absensi WHERE id_pekerjaan = ? AND jam_pulang IS NULL ORDER BY id_absensi DESC LIMIT 1',
+          [jobId]
+        );
+        if (actives.length > 0) {
+          id = actives[0].id_absensi;
+          if (!workerId) workerId = actives[0].id_karyawan;
+        }
+      }
+      if (!id) {
+        const [actives] = await db.query(
+          'SELECT id_absensi, id_karyawan FROM absensi WHERE jam_pulang IS NULL ORDER BY id_absensi DESC LIMIT 1'
+        );
+        if (actives.length > 0) {
+          id = actives[0].id_absensi;
+          if (!workerId) workerId = actives[0].id_karyawan;
+        }
       }
     }
 
@@ -481,7 +519,11 @@ async function absenPulang(req, res) {
 // 4. Admin Memverifikasi Absensi (Setujui / Tolak / Menunggu)
 async function verifikasiAbsensi(req, res) {
   try {
-    const id = req.params.id || req.query.id_absensi || req.body.id_absensi;
+    let id = req.params.id || req.query.id_absensi || req.body.id_absensi || req.body.id;
+    if (typeof id === 'string') {
+      const match = id.match(/\d+/);
+      id = match ? Number(match[0]) : null;
+    }
     const status_verifikasi = req.body.status_verifikasi || req.body.status;
     const catatan_admin = req.body.catatan_admin !== undefined ? req.body.catatan_admin : null;
 

@@ -74,7 +74,22 @@ async function userResolver(req, res, next) {
       userId = parseInt(req.headers['x-user-id'], 10);
     }
 
-    // Fallback Admin jika terindikasi dari header peran atau ID 1
+    // Fallback Admin & Super Admin jika terindikasi dari header peran atau ID
+    if (roleHeader === 'super_admin' || roleHeader === 'superadmin' || userId === 22) {
+      const perms = await getRolePermissionsMap('super_admin', db);
+      req.user = {
+        id: userId || 22,
+        id_user: userId || 22,
+        id_karyawan: null,
+        peran: 'super_admin',
+        role: 'super_admin',
+        nama: 'Super Admin',
+        email: 'superadmin@gmail.com',
+        permissions: perms
+      };
+      return next();
+    }
+
     if (roleHeader === 'admin' || userId === 1) {
       const perms = await getRolePermissionsMap('admin', db);
       req.user = {

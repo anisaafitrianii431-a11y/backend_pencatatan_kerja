@@ -9,50 +9,11 @@ function formatRupiah(val) {
 }
 
 /**
- * Validasi Hierarki dan Anti-Tumpang-Tindih Gaji antar-role berstatus aktif (is_active = 1)
+ * Validasi Hierarki Master Role (Disederhanakan: Hapus ketergantungan rentang gaji)
  */
 async function validateRoleHierarchy(targetRole, excludeId = null) {
-  const { nama_role, hierarchy_level, default_gaji_min_bulanan, default_gaji_max_bulanan } = targetRole;
-  const newLevel = parseInt(hierarchy_level, 10);
-  const newMin = parseFloat(default_gaji_min_bulanan);
-  const newMax = parseFloat(default_gaji_max_bulanan);
-
-  let query = 'SELECT * FROM master_role WHERE is_active = 1';
-  const params = [];
-  if (excludeId) {
-    query += ' AND id_role <> ?';
-    params.push(excludeId);
-  }
-
-  const [activeRoles] = await db.query(query, params);
-
-  for (const other of activeRoles) {
-    const oLevel = parseInt(other.hierarchy_level, 10);
-    const oMin = parseFloat(other.default_gaji_min_bulanan);
-    const oMax = parseFloat(other.default_gaji_max_bulanan);
-
-    // 1. Terhadap role berlevel lebih rendah: Min role baru HARUS > Max role level bawah
-    if (newLevel > oLevel) {
-      if (newMin <= oMax) {
-        return `Gaji minimal ${nama_role} (${formatRupiah(newMin)}) harus lebih besar dari gaji maksimal ${other.nama_role} level ${oLevel} (${formatRupiah(oMax)}).`;
-      }
-    }
-    // 2. Terhadap role berlevel lebih tinggi: Max role baru HARUS < Min role level atas
-    else if (newLevel < oLevel) {
-      if (newMax >= oMin) {
-        return `Gaji maksimal ${nama_role} (${formatRupiah(newMax)}) harus lebih kecil dari gaji minimal ${other.nama_role} level ${oLevel} (${formatRupiah(oMin)}).`;
-      }
-    }
-    // 3. Terhadap role dengan level sama: Rentang [min, max] TIDAK BOLEH beririsan atau bersentuhan
-    else if (newLevel === oLevel) {
-      const isSeparated = (newMax < oMin) || (newMin > oMax);
-      if (!isSeparated) {
-        return `Rentang gaji ${nama_role} (${formatRupiah(newMin)} - ${formatRupiah(newMax)}) tidak boleh tumpang tindih dengan ${other.nama_role} (${formatRupiah(oMin)} - ${formatRupiah(oMax)}) pada level hierarki yang sama (${newLevel}).`;
-      }
-    }
-  }
-
-  return null; // Validasi lolos
+  // Rentang gaji min-max tidak lagi membatasi hierarki jabatan
+  return null;
 }
 
 // 1. GET /api/master-role (Daftar semua role)
@@ -167,22 +128,8 @@ async function createMasterRole(req, res) {
       });
     }
 
-    const minSalary = parseFloat(default_gaji_min_bulanan);
-    const maxSalary = parseFloat(default_gaji_max_bulanan);
-
-    if (isNaN(minSalary) || minSalary <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Gaji minimal default harus lebih besar dari 0'
-      });
-    }
-
-    if (isNaN(maxSalary) || maxSalary <= minSalary) {
-      return res.status(400).json({
-        success: false,
-        message: 'Gaji maksimal default harus lebih besar dari gaji minimal'
-      });
-    }
+    const minSalary = parseFloat(default_gaji_min_bulanan) || 0;
+    const maxSalary = parseFloat(default_gaji_max_bulanan) || 0;
 
     // Cek duplikasi nama role (case-insensitive)
     const [existing] = await db.query(
@@ -281,22 +228,8 @@ async function updateMasterRole(req, res) {
       });
     }
 
-    const minSalary = parseFloat(default_gaji_min_bulanan);
-    const maxSalary = parseFloat(default_gaji_max_bulanan);
-
-    if (isNaN(minSalary) || minSalary <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Gaji minimal default harus lebih besar dari 0'
-      });
-    }
-
-    if (isNaN(maxSalary) || maxSalary <= minSalary) {
-      return res.status(400).json({
-        success: false,
-        message: 'Gaji maksimal default harus lebih besar dari gaji minimal'
-      });
-    }
+    const minSalary = parseFloat(default_gaji_min_bulanan) || 0;
+    const maxSalary = parseFloat(default_gaji_max_bulanan) || 0;
 
     // Cek duplikasi nama role terhadap role lain
     const [existing] = await db.query(

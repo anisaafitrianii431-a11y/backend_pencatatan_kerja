@@ -113,7 +113,7 @@ function validateRoleBudgetsHierarchy(roleBudgets) {
     }
     seenRoleIds.add(roleId);
 
-    // Cek kuota slot
+    // Cek kuota slot (minimal 1)
     const kuota = Number(r.kuota_slot);
     if (!Number.isInteger(kuota) || kuota < 1) {
       return {
@@ -121,71 +121,10 @@ function validateRoleBudgetsHierarchy(roleBudgets) {
         message: `Kuota slot untuk role "${roleName}" harus berupa bilangan bulat minimal 1.`
       };
     }
-
-    // Cek nominal min & max
-    const minVal = Number(r.gaji_min_bulanan);
-    const maxVal = Number(r.gaji_max_bulanan);
-
-    if (isNaN(minVal) || minVal <= 0) {
-      return {
-        valid: false,
-        message: `Gaji minimal bulanan untuk role "${roleName}" harus lebih besar dari 0.`
-      };
-    }
-
-    if (isNaN(maxVal) || maxVal <= minVal) {
-      return {
-        valid: false,
-        message: `Gaji maksimal bulanan untuk role "${roleName}" (Rp ${maxVal.toLocaleString('id-ID')}) harus lebih besar dari gaji minimal (Rp ${minVal.toLocaleString('id-ID')}).`
-      };
-    }
   }
 
-  // Bandingkan setiap pasangan (A, B)
-  for (let i = 0; i < roleBudgets.length; i++) {
-    for (let j = i + 1; j < roleBudgets.length; j++) {
-      const a = roleBudgets[i];
-      const b = roleBudgets[j];
-
-      const aLevel = Number(a.hierarchy_level);
-      const bLevel = Number(b.hierarchy_level);
-      const aMin = Number(a.gaji_min_bulanan);
-      const aMax = Number(a.gaji_max_bulanan);
-      const bMin = Number(b.gaji_min_bulanan);
-      const bMax = Number(b.gaji_max_bulanan);
-
-      const aName = a.nama_role || `Role #${a.id_role}`;
-      const bName = b.nama_role || `Role #${b.id_role}`;
-
-      if (aLevel < bLevel) {
-        // A jabatan lebih rendah dari B -> batas max A harus strictly < batas min B
-        if (aMax >= bMin) {
-          return {
-            valid: false,
-            message: `Batas maksimal gaji role ${aName} (Rp ${aMax.toLocaleString('id-ID')}) tidak boleh lebih besar atau sama dengan batas minimal role di atasnya, yaitu ${bName} (Rp ${bMin.toLocaleString('id-ID')}).`
-          };
-        }
-      } else if (aLevel > bLevel) {
-        // B jabatan lebih rendah dari A -> batas max B harus strictly < batas min A
-        if (bMax >= aMin) {
-          return {
-            valid: false,
-            message: `Batas maksimal gaji role ${bName} (Rp ${bMax.toLocaleString('id-ID')}) tidak boleh lebih besar atau sama dengan batas minimal role di atasnya, yaitu ${aName} (Rp ${aMin.toLocaleString('id-ID')}).`
-          };
-        }
-      } else {
-        // Level sama: rentang tidak boleh tumpang tindih
-        const noOverlap = aMax < bMin || aMin > bMax;
-        if (!noOverlap) {
-          return {
-            valid: false,
-            message: `Rentang gaji untuk role ${aName} (Rp ${aMin.toLocaleString('id-ID')} - Rp ${aMax.toLocaleString('id-ID')}) bertabrakan dengan role sejajar ${bName} (Rp ${bMin.toLocaleString('id-ID')} - Rp ${bMax.toLocaleString('id-ID')}).`
-          };
-        }
-      }
-    }
-  }
-
+  // Tingkatan jabatan pada proyek tidak ditentukan berdasarkan rentang gaji.
+  // Validasi rentang gaji min-max dihapus sesuai arahan Direktur.
   return { valid: true };
 }
 

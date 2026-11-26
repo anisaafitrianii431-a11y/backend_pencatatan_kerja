@@ -286,8 +286,72 @@ function calculateSegmentWage(segment, attendanceLogsInSegment = [], projectCale
   };
 }
 
+/**
+ * 4. Menghitung split jam kerja normal (maksimal 8 jam/hari) dan lembur (kelebihan > 8 jam)
+ *    sesuai aturan Aturan Jam Kerja dan Lembur (Section 5 Prompt Final):
+ *    - Standar jam kerja normal: 8 jam per karyawan per hari.
+ *    - Sesi kerja diurutkan berdasarkan jam_masuk ASC.
+ *    - Jam lembur dicatat pada proyek yang menyebabkan akumulasi jam kerja melebihi 8 jam.
+ *    - Jika batas 8 jam terlewati di tengah sesi, pecah durasi sesi tersebut menjadi jam normal dan lembur.
+ * 
+ * @param {Array<object>} approvedAbsensiList - Daftar absensi disetujui (dapat lintas proyek)
+ * @returns {Array<object>} Daftar sesi absensi yang telah dilengkapi jam_normal dan jam_lembur
+ */
+function calculateDailyOvertimeSplits(approvedAbsensiList = []) {
+  if (!Array.isArray(approvedAbsensiList) || approvedAbsensiList.length === 0) {
+    return [];
+  }
+
+  // Kelompokkan sesi berdasarkan kombinasi karyawan & tanggal (YYYY-MM-DD)
+  const dayGroups = new Map();
+
+  for (const session of approvedAbsensiList) {
+    const kId = session.id_karyawan || 'unknown';
+    const dateStr = session.tanggal ? String(session.tanggal).slice(0, 10) : '';
+    const key = `${kId}_${dateStr}`;
+
+    if (!dayGroups.has(key)) {
+      dayGroups.set(key, []);
+    }
+    dayGroups.get(key).push({ ...session });
+  }
+
+  const result = [];
+  const MAX_NORMAL_PER_DAY = 8.0;
+
+  for (const [, sessions] of dayGroups.entries()) {
+    // Urutkan sesi berdasarkan jam_masuk ASC
+    sessions.sort((a, b) => {
+      const timeA = a.jam_masuk ? String(a.jam_masuk) : '00:00:00';
+      const timeB = b.jam_masuk ? String(b.jam_masuk) : '00:00:00';
+      return timeA.localeCompare(timeB);
+    });
+
+    let currentDayNormal = 0;
+
+    for (const s of sessions) {
+      const totalDurasi = Math.max(0, Number(s.durasi_jam || 0));
+      const sisaNormalHariIni = Math.max(0, MAX_NORMAL_PER_DAY - currentDayNormal);
+
+      const normalThisSession = Math.min(totalDurasi, sisaNormalHariIni);
+      const overtimeThisSession = Math.max(0, totalDurasi - normalThisSession);
+
+      currentDayNormal += normalThisSession;
+
+      result.push({
+        ...s,
+        jam_normal: Number(normalThisSession.toFixed(2)),
+        jam_lembur: Number(overtimeThisSession.toFixed(2))
+      });
+    }
+  }
+
+  return result;
+}
+
 module.exports = {
   resolveSalaryForDate,
   splitPeriodBySalarySegments,
-  calculateSegmentWage
+  calculateSegmentWage,
+  calculateDailyOvertimeSplits
 };
