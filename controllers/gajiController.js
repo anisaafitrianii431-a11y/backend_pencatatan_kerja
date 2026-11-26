@@ -1517,19 +1517,43 @@ async function getSlipGaji(req, res) {
       [id_gaji]
     );
 
+    const payload = {
+      ...slip,
+      nama_karyawan: slip.nama,
+      nama_role: slip.jabatan,
+      total_upah_pokok: Number(slip.upah_normal !== undefined ? slip.upah_normal : slip.total_upah),
+      total_upah_lembur: Number(slip.upah_lembur || 0),
+      total_jam_lembur: Number(slip.jam_lembur || 0),
+      absensi_list: absensi,
+      reimburse_list: reimburse,
+      pembayaran_list: pembayaranList,
+      pembayaran: pembayaranList,
+      absensi: absensi,
+      reimburse: reimburse,
+      pekerjaan_summary: [
+        {
+          nama_pekerjaan: slip.nama_pekerjaan || 'Proyek Lapangan',
+          nama_role: slip.jabatan || 'Pelaksana',
+          peran_tugas: slip.jabatan || 'Pelaksana',
+          hierarchy_level: 1,
+          jenis_upah: slip.jenis_upah || 'per_jam',
+          nominal_upah: Number(slip.tarif || 0),
+          lama_bekerja: slip.jenis_upah === 'per_hari' ? `${slip.total_hari} Hari` : `${slip.total_jam} Jam`,
+          total_hari: slip.total_hari,
+          total_jam: slip.total_jam,
+          jam_lembur: slip.jam_lembur,
+          lembur_diizinkan: 1,
+          subtotal_upah: Number(slip.upah_normal !== undefined ? slip.upah_normal : slip.total_upah)
+        }
+      ]
+    };
+
     return res.json({
       success: true,
       message: 'Slip gaji berhasil dimuat',
       data: {
-        ...slip,
-        nama_karyawan: slip.nama,
-        nama_role: slip.jabatan,
-        total_upah_pokok: Number(slip.upah_normal !== undefined ? slip.upah_normal : slip.total_upah),
-        total_upah_lembur: Number(slip.upah_lembur || 0),
-        total_jam_lembur: Number(slip.jam_lembur || 0),
-        absensi_list: absensi,
-        reimburse_list: reimburse,
-        pembayaran_list: pembayaranList
+        ...payload,
+        gaji: payload
       }
     });
   } catch (error) {

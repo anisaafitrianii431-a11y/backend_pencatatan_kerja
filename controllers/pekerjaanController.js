@@ -915,48 +915,53 @@ async function updatePekerjaan(req, res) {
   }
 }
 
-// 6. Hapus Pekerjaan
+// 6. Hapus Pekerjaan (Cascading Clean Delete)
 async function deletePekerjaan(req, res) {
   try {
     const id = req.params.id || req.query.id_pekerjaan;
-    const force = req.query.force === '1' || req.body?.force === true;
 
     if (!id) {
       return res.status(400).json({ success: false, message: 'ID Pekerjaan tidak valid' });
     }
 
-    const [absRows] = await db.query('SELECT COUNT(*) AS total FROM absensi WHERE id_pekerjaan = ?', [id]);
-    const [pengRows] = await db.query('SELECT COUNT(*) AS total FROM pengeluaran WHERE id_pekerjaan = ?', [id]);
-    const totalAbs = absRows[0].total || 0;
-    const totalPeng = pengRows[0].total || 0;
+    // 1. Bersihkan riwayat gaji penugasan (penugasan_gaji_riwayat)
+    await db.query(`
+      DELETE pgr FROM penugasan_gaji_riwayat pgr 
+      INNER JOIN penugasan p ON pgr.id_penugasan = p.id_penugasan 
+      WHERE p.id_pekerjaan = ?
+    `, [id]);
 
-    if ((totalAbs > 0 || totalPeng > 0) && !force) {
-      return res.status(400).json({
-        success: false,
-        message: `Pekerjaan ini memiliki riwayat ${totalAbs} sesi absensi dan ${totalPeng} pengeluaran. Ubah status menjadi Selesai atau hapus paksa jika ingin membersihkannya.`,
-        has_history: true,
-        total_absensi: totalAbs,
-        total_pengeluaran: totalPeng
-      });
-    }
+    // 2. Bersihkan gaji yang terikat ke proyek ini
+    await db.query('DELETE FROM gaji WHERE id_pekerjaan = ?', [id]);
 
-    if (force) {
-      await db.query('DELETE FROM absensi WHERE id_pekerjaan = ?', [id]);
-      await db.query('DELETE FROM pengeluaran WHERE id_pekerjaan = ?', [id]);
-    }
+    // 3. Bersihkan laporan pekerjaan & lokasi
+    await db.query('DELETE FROM laporan_pekerjaan WHERE id_pekerjaan = ?', [id]);
+    await db.query('DELETE FROM lokasi_kerja WHERE id_pekerjaan = ?', [id]);
 
+    // 4. Bersihkan absensi & pengeluaran terkait proyek ini
+    await db.query('DELETE FROM absensi WHERE id_pekerjaan = ?', [id]);
+    await db.query('DELETE FROM pengeluaran WHERE id_pekerjaan = ?', [id]);
+
+    // 5. Bersihkan penugasan & role budget proyek
     await db.query('DELETE FROM penugasan WHERE id_pekerjaan = ?', [id]);
     await db.query('DELETE FROM pekerjaan_role_budget WHERE id_pekerjaan = ?', [id]);
-    await db.query('DELETE FROM pekerjaan WHERE id_pekerjaan = ?', [id]);
+
+    // 6. Hapus master pekerjaan
+    const [result] = await db.query('DELETE FROM pekerjaan WHERE id_pekerjaan = ?', [id]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Pekerjaan tidak ditemukan atau sudah dihapus' });
+    }
 
     return res.json({
       success: true,
       message: 'Pekerjaan berhasil dihapus'
     });
   } catch (error) {
+    console.error('Error deletePekerjaan:', error);
     return res.status(500).json({
       success: false,
-      message: 'Gagal menghapus pekerjaan',
+      message: error.message || 'Gagal menghapus pekerjaan',
       error: error.message
     });
   }

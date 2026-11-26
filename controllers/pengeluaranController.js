@@ -273,7 +273,7 @@ async function createPengeluaran(req, res) {
     }
 
     const nominalDisetujui = (status_verifikasi === 'disetujui') ? nominalNum : null;
-    const statusReimburse = (jenis_dana === 'pribadi') ? ((status_verifikasi === 'disetujui') ? 'disetujui' : 'menunggu') : 'menunggu';
+    const statusReimburse = (jenis_dana === 'pribadi') ? ((status_verifikasi === 'disetujui') ? 'disetujui' : 'menunggu') : null;
     const sisaBayar = (jenis_dana === 'pribadi') ? nominalNum : 0.00;
 
     const [result] = await db.query(
@@ -356,7 +356,7 @@ async function updatePengeluaran(req, res) {
     }
 
     const sisaBayar = (jDana === 'pribadi') ? nominalNum : 0.00;
-    const statusReimburse = (jDana === 'pribadi') ? 'menunggu' : 'menunggu';
+    const statusReimburse = (jDana === 'pribadi') ? 'menunggu' : null;
 
     await db.query(`
       UPDATE pengeluaran SET
@@ -417,34 +417,83 @@ async function verifikasiPengeluaran(req, res) {
       const sisaBayar = (curr.jenis_dana === 'pribadi') ? Math.max(0, nominal_disetujui - Number(curr.total_dibayar || 0)) : 0;
       const statusReimburse = (curr.jenis_dana === 'pribadi') ? (sisaBayar <= 0 ? 'sudah' : 'disetujui') : null;
 
-      await db.query(`
-        UPDATE pengeluaran SET
-          status_verifikasi = 'disetujui',
-          nominal_disetujui = ?,
-          sisa_pembayaran = ?,
-          status_reimbursement = ?,
-          catatan_penolakan = NULL
-        WHERE id_pengeluaran = ?
-      `, [nominal_disetujui, sisaBayar, statusReimburse, id]);
+      try {
+        await db.query(`
+          UPDATE pengeluaran SET
+            status_verifikasi = 'disetujui',
+            nominal_disetujui = ?,
+            sisa_pembayaran = ?,
+            status_reimbursement = ?,
+            catatan_penolakan = NULL
+          WHERE id_pengeluaran = ?
+        `, [nominal_disetujui, sisaBayar, statusReimburse, id]);
+      } catch (errDb) {
+        if (errDb.code === 'ER_BAD_NULL_ERROR' && errDb.sqlMessage?.includes('status_reimbursement')) {
+          await db.query(`
+            UPDATE pengeluaran SET
+              status_verifikasi = 'disetujui',
+              nominal_disetujui = ?,
+              sisa_pembayaran = ?,
+              status_reimbursement = 'sudah',
+              catatan_penolakan = NULL
+            WHERE id_pengeluaran = ?
+          `, [nominal_disetujui, sisaBayar, id]);
+        } else {
+          throw errDb;
+        }
+      }
     } else if (status_verifikasi === 'ditolak') {
-      await db.query(`
-        UPDATE pengeluaran SET
-          status_verifikasi = 'ditolak',
-          nominal_disetujui = 0,
-          sisa_pembayaran = 0,
-          status_reimbursement = CASE WHEN jenis_dana = 'pribadi' THEN 'ditolak' ELSE NULL END,
-          catatan_penolakan = ?
-        WHERE id_pengeluaran = ?
-      `, [catatan_penolakan, id]);
+      try {
+        await db.query(`
+          UPDATE pengeluaran SET
+            status_verifikasi = 'ditolak',
+            nominal_disetujui = 0,
+            sisa_pembayaran = 0,
+            status_reimbursement = CASE WHEN jenis_dana = 'pribadi' THEN 'ditolak' ELSE NULL END,
+            catatan_penolakan = ?
+          WHERE id_pengeluaran = ?
+        `, [catatan_penolakan, id]);
+      } catch (errDb) {
+        if (errDb.code === 'ER_BAD_NULL_ERROR' && errDb.sqlMessage?.includes('status_reimbursement')) {
+          await db.query(`
+            UPDATE pengeluaran SET
+              status_verifikasi = 'ditolak',
+              nominal_disetujui = 0,
+              sisa_pembayaran = 0,
+              status_reimbursement = 'ditolak',
+              catatan_penolakan = ?
+            WHERE id_pengeluaran = ?
+          `, [catatan_penolakan, id]);
+        } else {
+          throw errDb;
+        }
+      }
     } else {
       // Status 'menunggu'
-      await db.query(`
-        UPDATE pengeluaran SET
-          status_verifikasi = 'menunggu',
-          nominal_disetujui = NULL,
-          catatan_penolakan = ?
-        WHERE id_pengeluaran = ?
-      `, [catatan_penolakan, id]);
+      const statusReimburse = (curr.jenis_dana === 'pribadi') ? 'menunggu' : null;
+      try {
+        await db.query(`
+          UPDATE pengeluaran SET
+            status_verifikasi = 'menunggu',
+            nominal_disetujui = NULL,
+            status_reimbursement = ?,
+            catatan_penolakan = ?
+          WHERE id_pengeluaran = ?
+        `, [statusReimburse, catatan_penolakan, id]);
+      } catch (errDb) {
+        if (errDb.code === 'ER_BAD_NULL_ERROR' && errDb.sqlMessage?.includes('status_reimbursement')) {
+          await db.query(`
+            UPDATE pengeluaran SET
+              status_verifikasi = 'menunggu',
+              nominal_disetujui = NULL,
+              status_reimbursement = 'menunggu',
+              catatan_penolakan = ?
+            WHERE id_pengeluaran = ?
+          `, [catatan_penolakan, id]);
+        } else {
+          throw errDb;
+        }
+      }
     }
 
     return res.json({
@@ -452,9 +501,10 @@ async function verifikasiPengeluaran(req, res) {
       message: `Pengeluaran berhasil ${status_verifikasi === 'disetujui' ? 'disetujui' : status_verifikasi === 'ditolak' ? 'ditolak' : 'diubah ke status menunggu'}`
     });
   } catch (error) {
+    console.error('Error verifikasiPengeluaran:', error);
     return res.status(500).json({
       success: false,
-      message: 'Gagal memverifikasi pengeluaran',
+      message: 'Gagal memverifikasi pengeluaran: ' + error.message,
       error: error.message
     });
   }

@@ -330,6 +330,12 @@ async function absenMasuk(req, res) {
       ]
     );
 
+    // Otomatis ubah status proyek menjadi 'berjalan' saat pekerja pertama kali absen masuk
+    await db.query(
+      "UPDATE pekerjaan SET status = 'berjalan' WHERE id_pekerjaan = ? AND (status = 'belum_dimulai' OR status IS NULL OR status = 'draft')",
+      [id_pekerjaan]
+    );
+
     return res.status(201).json({
       success: true,
       message: 'Absen masuk berhasil dicatat! Menunggu persetujuan Admin.',
