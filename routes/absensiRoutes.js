@@ -12,7 +12,14 @@ router.all('/', (req, res, next) => {
   const action = req.query.action || req.body?.action;
   if (action === 'masuk') return absenMasuk(req, res);
   if (action === 'pulang') return absenPulang(req, res);
-  if (action === 'verifikasi' || req.body?.status_verifikasi || req.body?.status) return verifikasiAbsensi(req, res);
+  if (action === 'verifikasi') return verifikasiAbsensi(req, res);
+  if (req.method === 'PUT' && (req.query.id_absensi || req.body?.id_absensi || req.body?.jam_pulang)) {
+    if (req.body?.status_verifikasi || req.body?.status) {
+      return verifikasiAbsensi(req, res);
+    }
+    return absenPulang(req, res);
+  }
+  if (req.body?.status_verifikasi || req.body?.status) return verifikasiAbsensi(req, res);
   if (req.method === 'POST') return absenMasuk(req, res);
   if (req.method === 'GET') return getAllAbsensi(req, res);
   next();

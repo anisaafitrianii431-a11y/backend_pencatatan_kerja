@@ -243,6 +243,16 @@ async function createPengeluaran(req, res) {
       });
     }
 
+    if (req.user?.peran === 'karyawan') {
+      const [jobRows] = await db.query('SELECT status FROM pekerjaan WHERE id_pekerjaan = ? LIMIT 1', [jobId]);
+      if (jobRows[0]?.status === 'selesai') {
+        return res.status(400).json({
+          success: false,
+          message: 'Pekerjaan sudah selesai. Pencatatan pengeluaran untuk pekerjaan ini telah dikunci.'
+        });
+      }
+    }
+
     // Generate Nomor Transaksi
     const [countRows] = await db.query('SELECT COUNT(*) AS total FROM pengeluaran');
     const nextNum = (countRows[0].total || 0) + 1;
@@ -337,6 +347,15 @@ async function updatePengeluaran(req, res) {
     } = req.body;
 
     const jobId = (id_pekerjaan && !isNaN(parseInt(id_pekerjaan, 10))) ? parseInt(id_pekerjaan, 10) : curr.id_pekerjaan;
+    if (req.user?.peran === 'karyawan') {
+      const [jobRows] = await db.query('SELECT status FROM pekerjaan WHERE id_pekerjaan = ? LIMIT 1', [jobId]);
+      if (jobRows[0]?.status === 'selesai') {
+        return res.status(400).json({
+          success: false,
+          message: 'Pekerjaan sudah selesai. Pencatatan pengeluaran untuk pekerjaan ini telah dikunci.'
+        });
+      }
+    }
     const tgl = tanggal || curr.tanggal;
     const nominalNum = nominal !== undefined ? Number(nominal) : Number(curr.nominal);
     const kat = kategori || curr.kategori || 'operasional';
@@ -810,29 +829,49 @@ async function getDanaTersedia(req, res) {
 
     for (const d of danaRows) {
       const [usedRows] = await db.query(`
-        SELECT COALESCE(SUM(nominal), 0) AS total_pakai
+        SELECT
+          COALESCE(SUM(CASE WHEN status_verifikasi = 'disetujui' THEN nominal ELSE 0 END), 0) AS total_pakai,
+          COALESCE(SUM(CASE WHEN status_verifikasi = 'menunggu' THEN nominal ELSE 0 END), 0) AS total_menunggu
         FROM pengeluaran
-        WHERE id_dana = ? AND status_verifikasi = 'disetujui'
+        WHERE id_dana = ?
       `, [d.id_dana]);
       const [kembaliRows] = await db.query(`
-        SELECT COALESCE(SUM(nominal), 0) AS total_kembali
+        SELECT
+          COALESCE(SUM(CASE WHEN status_verifikasi = 'disetujui' THEN nominal ELSE 0 END), 0) AS total_kembali,
+          COALESCE(SUM(CASE WHEN status_verifikasi = 'menunggu' THEN nominal ELSE 0 END), 0) AS total_kembali_menunggu
         FROM pengembalian_dana
-        WHERE id_dana = ? AND status_verifikasi = 'disetujui'
+        WHERE id_dana = ?
       `, [d.id_dana]);
 
+      const modalAwal = Number(d.nominal || 0);
       const totalPakai = Number(usedRows[0]?.total_pakai || 0);
+      const totalMenunggu = Number(usedRows[0]?.total_menunggu || 0);
       const totalKembali = Number(kembaliRows[0]?.total_kembali || 0);
-      const sisaSaldo = Math.max(0, Number(d.nominal) - totalPakai - totalKembali);
+      const totalKembaliMenunggu = Number(kembaliRows[0]?.total_kembali_menunggu || 0);
+      const sisaSaldo = Math.max(0, modalAwal - totalPakai - totalKembali);
 
       const kasItem = {
         ...d,
+        nominal: modalAwal,
+        nominal_masuk: modalAwal,
         total_pengeluaran: totalPakai,
+        total_terpakai_disetujui: totalPakai,
+        total_terpakai_menunggu: totalMenunggu,
         total_pengembalian: totalKembali,
+        total_dikembalikan: totalKembali,
+        menunggu_konfirmasi_kembali: totalKembaliMenunggu,
         sisa_saldo: sisaSaldo,
-        saldo_sisa: sisaSaldo
+        saldo_sisa: sisaSaldo,
+        sisa_resmi: sisaSaldo,
+        status_lpj: sisaSaldo <= 0 ? 'selesai' : 'berjalan'
       };
 
-      daftarKas.push(kasItem);
+      // Hanya masukkan ke daftar kas belanja (daftarKas) jika masih memiliki sisa saldo > 0
+      if (sisaSaldo > 0) {
+        daftarKas.push(kasItem);
+      }
+
+      // Untuk kasSaya (riwayat pertanggungjawaban PJ), tetap sertakan semua agar PJ dapat memantau paket yang sudah selesai
       if (kId && Number(d.id_karyawan) === Number(kId)) {
         kasSaya.push(kasItem);
       }
@@ -1081,16 +1120,20 @@ async function tambahPengembalianDana(req, res) {
     const {
       id_karyawan,
       id_dana = null,
+      id_kas = null,
       id_penanggung_jawab = null,
       tanggal,
       nominal,
       penerima_pengembalian = 'Finance / Bendahara',
       keterangan = '',
       bukti_pengembalian = '',
+      foto_kwitansi = '',
       status_verifikasi = 'menunggu'
     } = req.body;
 
     const workerId = id_karyawan || req.user?.id_karyawan;
+    const danaId = id_dana || id_kas || null;
+    const pjId = id_penanggung_jawab || workerId || null;
     if (!workerId || !nominal) {
       return res.status(400).json({ success: false, message: 'Karyawan dan Nominal wajib diisi' });
     }
@@ -1098,14 +1141,15 @@ async function tambahPengembalianDana(req, res) {
     const tgl = tanggal || new Date().toISOString().slice(0, 10);
     const [countRows] = await db.query('SELECT COUNT(*) AS total FROM pengembalian_dana');
     const noTrans = `RET-${String((countRows[0].total || 0) + 1).padStart(4, '0')}`;
-    const fotoSaved = saveBase64Image(bukti_pengembalian, 'pengembalian', 'kembali_');
+    const rawBukti = bukti_pengembalian || foto_kwitansi || '';
+    const fotoSaved = saveBase64Image(rawBukti, 'pengembalian', 'kembali_');
 
     const [result] = await db.query(
       `INSERT INTO pengembalian_dana
         (nomor_transaksi, id_dana, id_karyawan, id_penanggung_jawab, tanggal, nominal, penerima_pengembalian, keterangan, bukti_pengembalian, status_verifikasi)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        noTrans, id_dana || null, workerId, id_penanggung_jawab || null,
+        noTrans, danaId, workerId, pjId,
         tgl, Number(nominal), penerima_pengembalian, keterangan, fotoSaved || null, status_verifikasi
       ]
     );

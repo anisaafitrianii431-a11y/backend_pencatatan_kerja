@@ -150,26 +150,10 @@ async function getAllPekerjaan(req, res) {
         });
       }
 
-      // Fallback jika belum ditugaskan pekerjaan spesifik: tampilkan pekerjaan yang sedang aktif
-      const [activeRows] = await db.query(`
-        SELECT p.*,
-          NULL AS id_penugasan,
-          'Anggota Tim' AS peran_saya,
-          'admin' AS jenis_penugasan,
-          'sudah' AS status_baca,
-          NULL AS tanggal_penugasan,
-          (SELECT COUNT(DISTINCT pnx.id_karyawan) FROM penugasan pnx WHERE pnx.id_pekerjaan = p.id_pekerjaan AND (pnx.status_penugasan IS NULL OR pnx.status_penugasan = 'aktif')) AS total_pekerja,
-          0 AS jam_kerja_saya,
-          0 AS pengeluaran_saya
-        FROM pekerjaan p
-        WHERE p.status = 'berjalan'
-        ORDER BY p.id_pekerjaan DESC
-      `);
-
       return res.json({
         success: true,
-        message: 'Daftar pekerjaan aktif berhasil dimuat (Karyawan)',
-        data: activeRows.map(formatJob)
+        message: 'Belum ada pekerjaan yang ditugaskan kepada karyawan ini',
+        data: []
       });
     }
 

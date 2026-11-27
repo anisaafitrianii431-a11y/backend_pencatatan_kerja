@@ -22,28 +22,22 @@ function readCookieToken(req) {
 /**
  * Middleware untuk mengekstrak identitas pengguna dari:
  * 1. Cookie pencatatan_auth
- * 2. Header Authorization (Bearer JWT atau Bearer <userId>)
- * 3. Header X-User-Id & X-User-Role dari React safeFetchJson
+ * 2. Header Authorization berisi JWT yang ditandatangani server
  */
 async function userResolver(req, res, next) {
   try {
-    const authHeader = req.headers['authorization'] || req.headers['x-user-id'];
-    const roleHeader = req.headers['x-user-role'];
+    const authHeader = req.headers['authorization'];
+    const roleHeader = String(req.headers['x-user-role'] || '').toLowerCase();
     const cookieToken = readCookieToken(req);
 
     let rawToken = null;
     let userId = null;
+    let tokenRole = null;
 
     if (authHeader) {
       if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
         const tokenOrId = authHeader.substring(7).trim();
-        if (/^\d+$/.test(tokenOrId)) {
-          userId = parseInt(tokenOrId, 10);
-        } else {
-          rawToken = tokenOrId;
-        }
-      } else if (/^\d+$/.test(String(authHeader).trim())) {
-        userId = parseInt(String(authHeader).trim(), 10);
+        rawToken = tokenOrId;
       }
     }
 
@@ -56,6 +50,7 @@ async function userResolver(req, res, next) {
       try {
         const secret = process.env.JWT_SECRET || 'rahasia_kunci_jwt_12345_pencatatan_kerja_super_aman_2026';
         const decoded = jwt.verify(rawToken, secret);
+        tokenRole = String(decoded.peran || decoded.role || '').toLowerCase();
         const parsedId = Number(decoded.id_user || decoded.sub || decoded.id);
         if (Number.isInteger(parsedId) && parsedId > 0) {
           userId = parsedId;
@@ -66,7 +61,7 @@ async function userResolver(req, res, next) {
           return next();
         }
       } catch (jwtErr) {
-        // Token JWT tidak valid atau kedaluwarsa, lanjut ke fallback jika ada header ID
+        // Token JWT tidak valid atau kedaluwarsa; permintaan akan ditolak
       }
     }
 
@@ -175,6 +170,13 @@ async function userResolver(req, res, next) {
         };
         return next();
       }
+    }
+
+    // Akun admin bawaan hanya diterima dari JWT admin yang ditandatangani server.
+    if (userId === 1 && tokenRole === 'admin') {
+      const perms = await getRolePermissionsMap('admin', db);
+      req.user = { id: 1, id_user: 1, id_karyawan: null, peran: 'admin', role: 'admin', nama: 'Administrator', email: 'admin@jamkerja.com', permissions: perms };
+      return next();
     }
 
     // Default jika tidak ada user ditemukan

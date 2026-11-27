@@ -18,9 +18,10 @@ router.all('/', (req, res, next) => {
 
   if (action === 'cek-ketersediaan') return cekKetersediaanKaryawan(req, res);
   if (action === 'gaji-riwayat' && rawId) {
-    const id = parseInt(rawId, 10);
-    if (req.method === 'POST') return updatePenugasanGajiRiwayat({ ...req, params: { id } }, res);
-    return getPenugasanGajiRiwayat({ ...req, params: { id } }, res);
+    req.params = req.params || {};
+    req.params.id = parseInt(rawId, 10);
+    if (req.method === 'POST') return updatePenugasanGajiRiwayat(req, res);
+    return getPenugasanGajiRiwayat(req, res);
   }
 
   if (req.method === 'POST') return createPenugasan(req, res);

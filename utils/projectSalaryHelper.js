@@ -79,15 +79,9 @@ function convertMonthlyRangeToAllUnits(minBulanan, maxBulanan, hariKerjaPerBulan
 }
 
 /**
- * 3. Validasi aturan hierarki & integritas blueprint role dalam satu proyek.
- * 
- * Aturan:
- * - Tidak boleh ada id_role duplikat.
- * - Setiap role: kuota_slot >= 1 (bulat), gaji_min_bulanan > 0, gaji_max_bulanan > gaji_min_bulanan.
- * - Antar role:
- *   - Jika A.hierarchy_level < B.hierarchy_level, wajib A.gaji_max_bulanan < B.gaji_min_bulanan.
- *   - Jika A.hierarchy_level === B.hierarchy_level, rentang tidak boleh beririsan/bersentuhan
- *     (A.gaji_max_bulanan < B.gaji_min_bulanan ATAU A.gaji_min_bulanan > B.gaji_max_bulanan).
+ * 3. Validasi integritas blueprint role dalam satu proyek.
+ * Gaji ditetapkan secara fleksibel saat penugasan, sehingga blueprint hanya
+ * memvalidasi role yang unik dan kuota slot yang valid.
  * 
  * @param {Array<object>} roleBudgets - Array role blueprint yang dilengkapi nama_role dan hierarchy_level
  * @returns {{ valid: boolean, message?: string }}

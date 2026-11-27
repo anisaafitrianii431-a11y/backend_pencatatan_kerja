@@ -1,4 +1,5 @@
-const { isAdminRole } = require('../utils/roles');
+const { isAdminRole, isBuiltInAdminRole } = require('../utils/roles');
+const { grants } = require('../config/defaultRolePermissions');
 const db = require('../config/database');
 
 function forbid(res) {
@@ -48,7 +49,14 @@ async function hasPermission(role, resource, action) {
     'SELECT ?? AS allowed FROM role_permissions WHERE role_name = ? AND resource_key = ? LIMIT 1',
     [action, role, resource],
   );
-  return rows.length > 0 && Number(rows[0].allowed) === 1;
+  // Gunakan izin bawaan jika role/resource belum memiliki baris konfigurasi.
+  // Ini menjaga akun karyawan yang sudah ada tetap dapat absen sebelum
+  // konfigurasi role_permissions disinkronkan.
+  if (rows.length === 0) {
+    const actionIndex = { can_create: 0, can_read: 1, can_update: 2, can_delete: 3 }[action];
+    return actionIndex !== undefined && Number(grants[role]?.[resource]?.[actionIndex] || 0) === 1;
+  }
+  return Number(rows[0].allowed) === 1;
 }
 
 async function authorizeRequest(req, res, next) {
@@ -72,7 +80,7 @@ async function authorizeRequest(req, res, next) {
   if (path === '/api/role-permissions/mine' && method === 'GET') return next();
   if (path === '/api/role-permissions' || path.startsWith('/api/role-permissions/')) return forbid(res);
 
-  // Akses Master Role diperbolehkan untuk Admin & Super Admin
+  // Akses Master Role diperbolehkan untuk Admin & Super Admin bawaan
   if (path === '/api/master-role' || path.startsWith('/api/master-role/') || path === '/api/master_role' || path.startsWith('/api/master_role/')) {
     if (isAdminRole(userRole)) return next();
     return forbid(res);
@@ -81,7 +89,22 @@ async function authorizeRequest(req, res, next) {
   const resource = getResource(path);
   const permissionAction = resource ? getPermissionAction(method, path, action) : null;
   if (!['admin', 'karyawan'].includes(userRole)) return forbid(res);
-  if (resource && (!permissionAction || !(await hasPermission(userRole, resource, permissionAction)))) {
+  if (!String(user.peran || '').trim()) return forbid(res);
+  // Pencatatan absensi adalah alur inti karyawan. Nilai can_create/can_update
+  // yang tersimpan dari konfigurasi lama tidak boleh memblokir absen masuk/pulang.
+  // Di bawah, ID karyawan pada request tetap ditimpa dengan ID dari sesi login.
+  const isWorkerAttendanceWrite = user.peran === 'karyawan' && resource === 'absensi' && (
+    (method === 'POST' && ['masuk', 'pulang'].includes(action)) ||
+    ((method === 'POST' || method === 'PUT') && /\/(masuk|pulang)\/?$/.test(path))
+  );
+  // Karyawan harus dapat membaca data transaksinya sendiri. Endpoint di bawah
+  // akan memaksa id_karyawan dari sesi server sebelum query dijalankan.
+  // Izin role_permissions yang belum disinkronkan (atau bernilai 0 dari versi
+  // lama) tidak boleh memblokir riwayat milik sendiri.
+  const isScopedWorkerRead = user.peran === 'karyawan' && method === 'GET' &&
+    ['absensi', 'pengeluaran'].includes(resource) &&
+    !(resource === 'pengeluaran' && isAdminOnlyExpenseAction(action));
+  if (resource && (!permissionAction || (!isScopedWorkerRead && !isWorkerAttendanceWrite && !(await hasPermission(user.peran, resource, permissionAction))))) {
     return forbid(res);
   }
 
@@ -132,15 +155,10 @@ async function authorizeRequest(req, res, next) {
 
   if (path.includes('/absensi')) {
     if (method === 'GET') return next();
-
-    // Verifikasi absensi hanya diperbolehkan untuk Admin & Super Admin
-    const isVerifikasi =
-      action === 'verifikasi' ||
-      path.includes('/verifikasi') ||
+    // Verifikasi absensi hanya diperbolehkan untuk Admin & Super Admin.
+    const isVerifikasi = action === 'verifikasi' || path.includes('/verifikasi') ||
       Boolean(req.body && (req.body.status_verifikasi || req.body.status));
     if (isVerifikasi) return forbid(res);
-
-    // Karyawan diizinkan melakukan proses absen masuk dan pulang
     return next();
   }
 

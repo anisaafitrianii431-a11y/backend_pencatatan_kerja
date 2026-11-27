@@ -43,7 +43,7 @@ router.all('/', (req, res, next) => {
   if (action === 'bayar_reimbursement') return bayarReimbursement(req, res);
   if (action === 'tambah_dana') return tambahDanaKantor(req, res);
   if (action === 'update_kas' || action === 'edit_dana') return updateDanaKantor(req, res);
-  if (action === 'tambah_pengembalian') return tambahPengembalianDana(req, res);
+  if (action === 'pengembalian' || action === 'tambah_pengembalian') return tambahPengembalianDana(req, res);
   if (action === 'verifikasi_pengembalian') return verifikasiPengembalianDana(req, res);
   if (action === 'create' || action === 'tambah_pengeluaran') return createPengeluaran(req, res);
   if (action === 'delete' || action === 'hapus_pengeluaran') return deletePengeluaran(req, res);

@@ -24,7 +24,7 @@ ALTER TABLE `user`
   ADD COLUMN IF NOT EXISTS username VARCHAR(50) NULL,
   ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 ALTER TABLE `user`
-  MODIFY COLUMN peran ENUM('super_admin','admin','karyawan') NOT NULL DEFAULT 'karyawan';
+  MODIFY COLUMN peran VARCHAR(50) NOT NULL DEFAULT 'karyawan';
 
 ALTER TABLE pekerjaan
   ADD COLUMN IF NOT EXISTS metode_lokasi ENUM('titik','wfh') NOT NULL DEFAULT 'titik',
@@ -41,6 +41,8 @@ ALTER TABLE pekerjaan
   MODIFY COLUMN metode_penentuan ENUM('langsung','terbuka','gabungan') NOT NULL DEFAULT 'terbuka';
 
 ALTER TABLE penugasan
+  ADD COLUMN IF NOT EXISTS jenis_upah ENUM('per_jam','per_hari','per_bulan','per_tahun','borongan') NOT NULL DEFAULT 'per_jam',
+  ADD COLUMN IF NOT EXISTS nominal_upah DECIMAL(15,2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS peran_tugas VARCHAR(100) DEFAULT 'Anggota Tim Pelaksana',
   ADD COLUMN IF NOT EXISTS jenis_penugasan ENUM('admin','mandiri') NOT NULL DEFAULT 'admin',
   ADD COLUMN IF NOT EXISTS status_baca ENUM('belum','sudah') NOT NULL DEFAULT 'belum',
@@ -84,8 +86,16 @@ ALTER TABLE pengeluaran
   MODIFY COLUMN status_ganti ENUM('belum','sebagian','sudah') NOT NULL DEFAULT 'belum';
 
 ALTER TABLE gaji
+  ADD COLUMN IF NOT EXISTS id_pekerjaan INT NULL AFTER id_karyawan,
+  ADD COLUMN IF NOT EXISTS id_penugasan INT NULL AFTER id_pekerjaan,
+  ADD COLUMN IF NOT EXISTS jabatan VARCHAR(100) NULL AFTER id_penugasan,
   ADD COLUMN IF NOT EXISTS jenis_upah ENUM('per_jam','per_hari','per_bulan') DEFAULT 'per_jam',
   ADD COLUMN IF NOT EXISTS total_hari INT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS jam_normal DECIMAL(6,2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS jam_lembur DECIMAL(6,2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS upah_normal DECIMAL(14,2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS upah_lembur DECIMAL(14,2) NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS catatan_lembur VARCHAR(255) NULL,
   ADD COLUMN IF NOT EXISTS bonus DECIMAL(14,2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS potongan DECIMAL(14,2) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS catatan_penyesuaian TEXT NULL,
@@ -182,8 +192,17 @@ CREATE TABLE IF NOT EXISTS pembayaran_gaji (
   INDEX (id_gaji)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS custom_roles (
+  role_name VARCHAR(50) NOT NULL,
+  display_name VARCHAR(100) NOT NULL,
+  description VARCHAR(255) NULL,
+  is_system TINYINT(1) NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (role_name)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS role_permissions (
-  role_name ENUM('admin','karyawan') NOT NULL,
+  role_name VARCHAR(50) NOT NULL,
   resource_key VARCHAR(40) NOT NULL,
   can_create TINYINT(1) NOT NULL DEFAULT 0,
   can_read TINYINT(1) NOT NULL DEFAULT 0,
@@ -192,3 +211,6 @@ CREATE TABLE IF NOT EXISTS role_permissions (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (role_name, resource_key)
 ) ENGINE=InnoDB;
+
+ALTER TABLE role_permissions
+  MODIFY COLUMN role_name VARCHAR(50) NOT NULL;

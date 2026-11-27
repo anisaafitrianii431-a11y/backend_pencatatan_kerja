@@ -20,7 +20,10 @@ const sqlDurasi = `
 async function getAllPenugasan(req, res) {
   try {
     const action = req.query.action || req.body?.action;
-    const kId = req.user?.id_karyawan || (req.query.id_karyawan ? parseInt(req.query.id_karyawan, 10) : null);
+    const isWorker = req.user?.peran === 'karyawan';
+    const kId = isWorker
+      ? Number(req.user.id_karyawan)
+      : (req.query.id_karyawan ? parseInt(req.query.id_karyawan, 10) : null);
 
     // Fitur Notifikasi Penugasan
     if (action === 'notifikasi') {
@@ -54,7 +57,18 @@ async function getAllPenugasan(req, res) {
     const { id_pekerjaan, id_karyawan } = req.query;
 
     // Jika karyawan melihat rekan kerja pada satu pekerjaan
-    if (req.user?.peran === 'karyawan' && id_pekerjaan) {
+    if (isWorker && id_pekerjaan) {
+      const [ownAssignment] = await db.query(
+        `SELECT id_penugasan FROM penugasan
+         WHERE id_pekerjaan = ? AND id_karyawan = ?
+           AND (status_penugasan IS NULL OR status_penugasan = 'aktif')
+         LIMIT 1`,
+        [id_pekerjaan, kId]
+      );
+      if (ownAssignment.length === 0) {
+        return res.status(403).json({ success: false, message: 'Anda tidak memiliki penugasan pada pekerjaan ini.' });
+      }
+
       const [totalRow] = await db.query(`
         SELECT COALESCE(SUM(${sqlDurasi}), 0) AS total_jam
         FROM absensi a
@@ -101,7 +115,8 @@ async function getAllPenugasan(req, res) {
     let query = `
       SELECT pn.*,
         p.kode_pekerjaan, p.nama_pekerjaan, p.deskripsi, p.lokasi, p.titik_lokasi, p.metode_lokasi, p.latitude, p.longitude, p.radius_meter,
-        p.tanggal_mulai, p.target_selesai, p.status AS status_pekerjaan, p.jenis_upah, p.nominal_upah,
+        p.tanggal_mulai, p.target_selesai, p.status AS status_pekerjaan,
+        p.jenis_upah AS jenis_upah_proyek, p.nominal_upah AS nominal_upah_proyek,
         p.hari_kerja_per_bulan, p.jam_kerja_per_hari,
         k.nama AS nama_karyawan, k.kode_karyawan, k.jabatan
       FROM penugasan pn
@@ -118,7 +133,10 @@ async function getAllPenugasan(req, res) {
       query += ` AND pn.id_pekerjaan = ? `;
       params.push(id_pekerjaan);
     }
-    if (id_karyawan) {
+    if (isWorker) {
+      query += ` AND pn.id_karyawan = ? `;
+      params.push(kId);
+    } else if (id_karyawan) {
       query += ` AND pn.id_karyawan = ? `;
       params.push(id_karyawan);
     }

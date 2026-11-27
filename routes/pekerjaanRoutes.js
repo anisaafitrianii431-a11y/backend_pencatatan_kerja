@@ -26,49 +26,45 @@ const {
 
 // Dispatcher root untuk kompatibilitas /api/pekerjaan dan /api/pekerjaan.php
 router.all('/', (req, res, next) => {
-  const action = req.query.action || req.body?.action;
-  const rawId = req.query.id_pekerjaan;
+  const action = req.query?.action || req.body?.action;
+  const rawId = req.query?.id_pekerjaan || req.body?.id_pekerjaan;
+  req.params = req.params || {};
+  if (rawId && !req.params.id) {
+    req.params.id = parseInt(rawId, 10);
+  }
 
   if (action === 'tersedia') return getPekerjaanTersedia(req, res);
   if (action === 'ambil') return ambilPekerjaan(req, res);
-  if (action === 'blueprint' && rawId) {
-    const bId = parseInt(rawId, 10);
-    if (req.method === 'PUT') return updatePekerjaanBlueprint({ ...req, params: { id: bId } }, res);
-    return getPekerjaanBlueprint({ ...req, params: { id: bId } }, res);
+  if (action === 'blueprint' && req.params.id) {
+    if (req.method === 'PUT') return updatePekerjaanBlueprint(req, res);
+    return getPekerjaanBlueprint(req, res);
   }
-  if (action === 'budget-summary' && rawId) {
-    const bId = parseInt(rawId, 10);
-    return getPekerjaanBudgetSummary({ ...req, params: { id: bId } }, res);
+  if (action === 'budget-summary' && req.params.id) {
+    return getPekerjaanBudgetSummary(req, res);
   }
-  if (action === 'kandidat-karyawan' && rawId) {
-    const bId = parseInt(rawId, 10);
-    return getPekerjaanKandidatKaryawan({ ...req, params: { id: bId } }, res);
+  if (action === 'kandidat-karyawan' && req.params.id) {
+    return getPekerjaanKandidatKaryawan(req, res);
   }
 
   if (req.method === 'POST') return createPekerjaan(req, res);
-  if (req.method === 'PUT') return updatePekerjaan(rawId ? { ...req, params: { ...req.params, id: parseInt(rawId, 10) } } : req, res);
-  if (req.method === 'DELETE') return deletePekerjaan(rawId ? { ...req, params: { ...req.params, id: parseInt(rawId, 10) } } : req, res);
+  if (req.method === 'PUT') return updatePekerjaan(req, res);
+  if (req.method === 'DELETE') return deletePekerjaan(req, res);
   if (rawId) {
     if (String(rawId).includes('/pekerja')) {
-      const jId = parseInt(rawId, 10);
-      return getPekerjaanPekerja({ ...req, params: { id: jId } }, res);
+      return getPekerjaanPekerja(req, res);
     }
     if (String(rawId).includes('/laporan')) {
-      const jId = parseInt(rawId, 10);
-      return getPekerjaanLaporan({ ...req, params: { id: jId } }, res);
+      return getPekerjaanLaporan(req, res);
     }
     if (String(rawId).includes('/blueprint')) {
-      const jId = parseInt(rawId, 10);
-      if (req.method === 'PUT') return updatePekerjaanBlueprint({ ...req, params: { id: jId } }, res);
-      return getPekerjaanBlueprint({ ...req, params: { id: jId } }, res);
+      if (req.method === 'PUT') return updatePekerjaanBlueprint(req, res);
+      return getPekerjaanBlueprint(req, res);
     }
     if (String(rawId).includes('/budget-summary')) {
-      const jId = parseInt(rawId, 10);
-      return getPekerjaanBudgetSummary({ ...req, params: { id: jId } }, res);
+      return getPekerjaanBudgetSummary(req, res);
     }
     if (String(rawId).includes('/kandidat-karyawan')) {
-      const jId = parseInt(rawId, 10);
-      return getPekerjaanKandidatKaryawan({ ...req, params: { id: jId } }, res);
+      return getPekerjaanKandidatKaryawan(req, res);
     }
     const numId = parseInt(rawId, 10);
     if (!isNaN(numId) && numId > 0) {

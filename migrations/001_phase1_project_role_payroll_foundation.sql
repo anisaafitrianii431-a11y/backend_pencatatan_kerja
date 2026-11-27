@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS `master_role` (
 CREATE TABLE IF NOT EXISTS `pekerjaan_role_budget` (
   `id_role_budget` INT AUTO_INCREMENT PRIMARY KEY,
   `id_pekerjaan` INT NOT NULL,
-  `id_role` INT NOT NULL,
+  `id_role` INT UNSIGNED NOT NULL,
   `kuota_slot` INT NOT NULL DEFAULT 1,
   `gaji_min_bulanan` DECIMAL(15,2) NOT NULL,
   `gaji_max_bulanan` DECIMAL(15,2) NOT NULL,

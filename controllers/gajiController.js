@@ -112,6 +112,7 @@ async function calculateEmployeePayrollDetailed(karyawan, approvedAbsensi = [], 
   // Ambil penugasan aktif karyawan pada proyek yang terhubung ke master_role via pekerjaan_role_budget
   const [assignments] = await db.query(`
     SELECT pn.id_penugasan, pn.id_pekerjaan, pn.peran_tugas, pn.id_role_budget,
+           pn.jenis_upah AS assignment_jenis_upah, pn.nominal_upah AS assignment_nominal_upah,
            pn.tanggal_penugasan, pn.tanggal_selesai_tugas, pn.status_penugasan,
            p.nama_pekerjaan, p.kode_pekerjaan, p.tanggal_mulai AS project_start, p.target_selesai AS project_end,
            p.hari_kerja_per_bulan, p.jam_kerja_per_hari, p.lembur_diizinkan, p.tanggal_cutoff, p.tanggal_pencairan,
@@ -174,8 +175,8 @@ async function calculateEmployeePayrollDetailed(karyawan, approvedAbsensi = [], 
       );
 
       const fallbackConfig = {
-        jenis_upah: as.job_jenis_upah || karyawan.jenis_upah || 'per_jam',
-        nominal_upah: Number(as.job_nominal_upah || karyawan.nominal_upah || karyawan.tarif_per_jam || 0)
+        jenis_upah: as.assignment_jenis_upah || as.job_jenis_upah || karyawan.jenis_upah || 'per_jam',
+        nominal_upah: Number(as.assignment_nominal_upah || as.job_nominal_upah || karyawan.nominal_upah || karyawan.tarif_per_jam || 0)
       };
 
       const segments = splitPeriodBySalarySegments(
@@ -402,6 +403,397 @@ async function calculateEmployeePayrollDetailed(karyawan, approvedAbsensi = [], 
   };
 }
 
+// Helper: Engine Kalkulasi Payroll Lengkap & Sinkronisasi DB Gaji
+async function computeRekapGajiData(periode, filterIdPekerjaan = null, filterIdKaryawan = null) {
+  // 1. Ambil data penetapan gaji yang sudah tersimpan di database untuk periode ini
+  const [savedGajiList] = await db.query(`
+    SELECT g.*,
+           k.nama AS nama_karyawan, k.kode_karyawan, k.jabatan AS master_jabatan,
+           p.nama_pekerjaan, p.kode_pekerjaan
+    FROM gaji g
+    JOIN karyawan k ON g.id_karyawan = k.id_karyawan
+    LEFT JOIN pekerjaan p ON g.id_pekerjaan = p.id_pekerjaan
+    WHERE g.periode = ?
+  `, [periode]);
+
+  const savedMap = new Map();
+  savedGajiList.forEach(g => {
+    const pKey = g.id_pekerjaan !== null && g.id_pekerjaan !== undefined ? String(g.id_pekerjaan) : 'null';
+    savedMap.set(`${g.id_karyawan}_${pKey}`, g);
+  });
+
+  // 2. Ambil penugasan proyek aktif
+  const [assignments] = await db.query(`
+    SELECT pn.id_penugasan, pn.id_karyawan, pn.id_pekerjaan, pn.id_role_budget,
+           COALESCE(pn.jenis_upah, 'per_jam') AS jenis_upah,
+           COALESCE(pn.nominal_upah, 0) AS nominal_upah,
+           pn.peran_tugas, pn.tanggal_penugasan, pn.tanggal_selesai_tugas,
+           k.nama AS nama_karyawan, k.kode_karyawan, k.jabatan AS master_jabatan,
+           k.nominal_upah AS master_nominal_upah, k.tarif_per_jam AS master_tarif_per_jam,
+           k.jenis_upah AS master_jenis_upah,
+           p.nama_pekerjaan, p.kode_pekerjaan, p.status AS status_pekerjaan,
+           mr.nama_role, mr.hierarchy_level
+    FROM penugasan pn
+    JOIN karyawan k ON pn.id_karyawan = k.id_karyawan
+    JOIN pekerjaan p ON pn.id_pekerjaan = p.id_pekerjaan
+    LEFT JOIN pekerjaan_role_budget prb ON pn.id_role_budget = prb.id_role_budget
+    LEFT JOIN master_role mr ON prb.id_role = mr.id_role
+    WHERE (pn.status_penugasan IS NULL OR pn.status_penugasan = 'aktif')
+    ORDER BY p.nama_pekerjaan ASC, k.nama ASC
+  `);
+
+  // 3. Ambil riwayat skema gaji penugasan (penugasan_gaji_riwayat)
+  const [salaryHistories] = await db.query(
+    'SELECT * FROM penugasan_gaji_riwayat ORDER BY id_penugasan ASC, effective_from ASC, id_riwayat_gaji ASC'
+  );
+  const historyMap = new Map();
+  salaryHistories.forEach(h => {
+    const pIdNum = Number(h.id_penugasan);
+    if (!historyMap.has(pIdNum)) historyMap.set(pIdNum, []);
+    historyMap.get(pIdNum).push(h);
+  });
+
+  // 4. Ambil seluruh absensi yang disetujui pada periode ini
+  const [allApprovedAbsensi] = await db.query(`
+    SELECT
+      a.id_absensi,
+      a.id_karyawan,
+      a.tanggal,
+      a.jam_masuk,
+      a.jam_pulang,
+      a.id_pekerjaan,
+      p.nama_pekerjaan,
+      ${sqlDurasi} AS durasi_jam
+    FROM absensi a
+    LEFT JOIN pekerjaan p ON a.id_pekerjaan = p.id_pekerjaan
+    WHERE a.status_verifikasi = 'disetujui'
+      AND a.jam_pulang IS NOT NULL
+      AND a.tanggal LIKE ?
+    ORDER BY a.tanggal ASC, a.jam_masuk ASC
+  `, [`${periode}%`]);
+
+  // Jalankan aturan jam kerja normal 8 jam/hari & akumulasi lembur harian lintas proyek (Section 5 Prompt Final)
+  const splitAbsensiList = calculateDailyOvertimeSplits(allApprovedAbsensi);
+
+  // 5. Ambil reimbursement pribadi yang disetujui pada periode ini
+  const [allReimburse] = await db.query(`
+    SELECT id_karyawan, id_pekerjaan, COALESCE(nominal, 0) AS nominal
+    FROM pengeluaran
+    WHERE jenis_dana = 'pribadi'
+      AND status_verifikasi = 'disetujui'
+      AND tanggal LIKE ?
+  `, [`${periode}%`]);
+
+  // 6. Ambil semua karyawan
+  const [karyawanList] = await db.query(
+    'SELECT id_karyawan, kode_karyawan, nama, jabatan, jenis_upah, nominal_upah, tarif_per_jam, status FROM karyawan ORDER BY nama ASC'
+  );
+  const karyawanMap = new Map(karyawanList.map(k => [Number(k.id_karyawan), k]));
+
+  // 7. Bentuk unit unik per (id_karyawan, id_pekerjaan)
+  const unitMap = new Map();
+
+  // Dari penugasan
+  assignments.forEach(as => {
+    const key = `${as.id_karyawan}_${as.id_pekerjaan}`;
+    unitMap.set(key, {
+      id_karyawan: Number(as.id_karyawan),
+      id_pekerjaan: Number(as.id_pekerjaan),
+      id_penugasan: Number(as.id_penugasan),
+      nama_pekerjaan: as.nama_pekerjaan,
+      kode_pekerjaan: as.kode_pekerjaan,
+      jabatan: as.nama_role || as.peran_tugas || as.master_jabatan || 'Pelaksana',
+      nama_role: as.nama_role || as.master_jabatan || 'Pelaksana',
+      hierarchy_level: as.hierarchy_level || 1,
+      jenis_upah: as.jenis_upah || 'per_jam',
+      nominal_upah: Number(as.nominal_upah || 0)
+    });
+  });
+
+  // Dari absensi yang tercatat
+  allApprovedAbsensi.forEach(a => {
+    const pId = a.id_pekerjaan ? Number(a.id_pekerjaan) : null;
+    const key = `${a.id_karyawan}_${pId !== null ? pId : 'null'}`;
+    if (!unitMap.has(key)) {
+      const k = karyawanMap.get(Number(a.id_karyawan));
+      unitMap.set(key, {
+        id_karyawan: Number(a.id_karyawan),
+        id_pekerjaan: pId,
+        id_penugasan: null,
+        nama_pekerjaan: a.nama_pekerjaan || (pId ? `Proyek #${pId}` : 'Umum / Non-Proyek'),
+        kode_pekerjaan: pId ? `PRJ-${pId}` : 'NON-PRJ',
+        jabatan: k?.jabatan || 'Pelaksana',
+        nama_role: k?.jabatan || 'Pelaksana',
+        hierarchy_level: 1,
+        jenis_upah: k?.jenis_upah || 'per_jam',
+        nominal_upah: Number(k?.nominal_upah || k?.tarif_per_jam || 0)
+      });
+    }
+  });
+
+  // Dari catatan gaji tersimpan
+  savedGajiList.forEach(g => {
+    const pId = g.id_pekerjaan !== null && g.id_pekerjaan !== undefined ? Number(g.id_pekerjaan) : null;
+    const key = `${g.id_karyawan}_${pId !== null ? pId : 'null'}`;
+    if (!unitMap.has(key)) {
+      const k = karyawanMap.get(Number(g.id_karyawan));
+      unitMap.set(key, {
+        id_karyawan: Number(g.id_karyawan),
+        id_pekerjaan: pId,
+        id_penugasan: g.id_penugasan ? Number(g.id_penugasan) : null,
+        nama_pekerjaan: g.nama_pekerjaan || (pId ? `Proyek #${pId}` : 'Umum / Non-Proyek'),
+        kode_pekerjaan: g.kode_pekerjaan || (pId ? `PRJ-${pId}` : 'NON-PRJ'),
+        jabatan: g.jabatan || k?.jabatan || 'Pelaksana',
+        nama_role: g.jabatan || k?.jabatan || 'Pelaksana',
+        hierarchy_level: 1,
+        jenis_upah: g.jenis_upah || 'per_jam',
+        nominal_upah: Number(g.tarif || 0)
+      });
+    }
+  });
+
+  // Masukkan karyawan aktif yang belum terdaftar di proyek agar tetap dapat dipantau di payroll umum
+  karyawanList.forEach(k => {
+    const hasAny = Array.from(unitMap.values()).some(u => u.id_karyawan === Number(k.id_karyawan));
+    if (!hasAny) {
+      const key = `${k.id_karyawan}_null`;
+      unitMap.set(key, {
+        id_karyawan: Number(k.id_karyawan),
+        id_pekerjaan: null,
+        id_penugasan: null,
+        nama_pekerjaan: 'Umum / Non-Proyek',
+        kode_pekerjaan: 'NON-PRJ',
+        jabatan: k.jabatan || 'Staf',
+        nama_role: k.jabatan || 'Staf',
+        hierarchy_level: 1,
+        jenis_upah: k.jenis_upah || 'per_jam',
+        nominal_upah: Number(k.nominal_upah || k.tarif_per_jam || 0)
+      });
+    }
+  });
+
+  // 8. Kalkulasi penggajian per unit proyek
+  const result = [];
+
+  for (const [key, unit] of unitMap.entries()) {
+    if (filterIdPekerjaan !== null && unit.id_pekerjaan !== filterIdPekerjaan) continue;
+    if (filterIdKaryawan !== null && unit.id_karyawan !== filterIdKaryawan) continue;
+
+    const k = karyawanMap.get(unit.id_karyawan) || {};
+    const saved = savedMap.get(key);
+
+    // Ambil absensi khusus unit proyek ini yang sudah terpecah jam_normal dan jam_lembur
+    const unitAbsensi = splitAbsensiList.filter(a => {
+      const matchKaryawan = Number(a.id_karyawan) === unit.id_karyawan;
+      const matchPekerjaan = unit.id_pekerjaan !== null
+        ? Number(a.id_pekerjaan) === unit.id_pekerjaan
+        : (!a.id_pekerjaan || Number(a.id_pekerjaan) === 0);
+      return matchKaryawan && matchPekerjaan;
+    });
+
+    const jamNormal = Number(unitAbsensi.reduce((acc, s) => acc + Number(s.jam_normal || 0), 0).toFixed(2));
+    const jamLembur = Number(unitAbsensi.reduce((acc, s) => acc + Number(s.jam_lembur || 0), 0).toFixed(2));
+    const totalJam = Number((jamNormal + jamLembur).toFixed(2));
+
+    const uniqueDays = new Set(unitAbsensi.map(s => String(s.tanggal).slice(0, 10)));
+    const hariKerja = uniqueDays.size;
+
+    // Resolusi tarif upah dari penugasan atau riwayat skema gaji
+    let effectiveTarif = unit.nominal_upah;
+    let effectiveJenis = unit.jenis_upah;
+
+    if (unit.id_penugasan && historyMap.has(unit.id_penugasan)) {
+      const histList = historyMap.get(unit.id_penugasan);
+      const latestHist = resolveSalaryForDate(histList, `${periode}-15`, {
+        jenis_upah: unit.jenis_upah,
+        nominal_upah: unit.nominal_upah
+      });
+      if (latestHist && Number(latestHist.nominal_upah) > 0) {
+        effectiveTarif = Number(latestHist.nominal_upah);
+        effectiveJenis = latestHist.jenis_upah;
+      }
+    }
+
+    if (!effectiveTarif && k.nominal_upah) {
+      effectiveTarif = Number(k.nominal_upah);
+      effectiveJenis = k.jenis_upah || effectiveJenis;
+    }
+
+    // Hitung upah normal
+    let upahNormal = 0;
+    if (effectiveJenis === 'per_jam') {
+      upahNormal = Math.round(jamNormal * effectiveTarif);
+    } else if (effectiveJenis === 'per_hari') {
+      upahNormal = Math.round(hariKerja * effectiveTarif);
+    } else if (effectiveJenis === 'per_bulan' || effectiveJenis === 'borongan') {
+      upahNormal = Math.round(effectiveTarif);
+    } else if (effectiveJenis === 'per_tahun') {
+      upahNormal = Math.round(effectiveTarif / 12);
+    }
+
+    // Upah lembur: Sesuai Section 5 Prompt Final, nominal lembur belum ditentukan Direktur.
+    // Sediakan nilai jika sudah diset Admin, default 0 tanpa mengarang pengali.
+    const upahLembur = saved ? Number(saved.upah_lembur || 0) : 0;
+    const totalUpahDihitung = upahNormal + upahLembur;
+
+    // Reimbursement disetujui untuk unit proyek ini
+    const unitReimburses = allReimburse.filter(r => {
+      const matchK = Number(r.id_karyawan) === unit.id_karyawan;
+      const matchP = unit.id_pekerjaan !== null
+        ? Number(r.id_pekerjaan) === unit.id_pekerjaan
+        : (!r.id_pekerjaan || Number(r.id_pekerjaan) === 0);
+      return matchK && matchP;
+    });
+    const totalGanti = unitReimburses.reduce((acc, r) => acc + Number(r.nominal || 0), 0);
+
+    if (saved) {
+      const liveUpahNormal = upahNormal;
+      const liveUpahLembur = Number(saved.upah_lembur || 0);
+      const liveTotalUpah = liveUpahNormal + liveUpahLembur;
+      const liveTotalGanti = totalGanti;
+      const liveBonus = Number(saved.bonus || 0);
+      const livePotongan = Number(saved.potongan || 0);
+      const liveGajiBersih = liveTotalUpah + liveTotalGanti + liveBonus - livePotongan;
+      const liveSudahDibayar = Number(saved.total_dibayar || 0);
+      const liveSisa = Math.max(0, liveGajiBersih - liveSudahDibayar);
+      const liveStatusBayar = liveSisa <= 0 ? 'sudah' : (liveSudahDibayar > 0 ? 'sebagian' : 'belum');
+
+      // Jika ada penambahan hari kerja atau reimbursement baru setelah gaji ditetapkan
+      const isOutOfSync =
+        Math.abs(Number(saved.total_hari || 0) - hariKerja) >= 1 ||
+        Math.abs(Number(saved.total_jam || 0) - totalJam) >= 0.01 ||
+        Math.abs(Number(saved.total_ganti || 0) - liveTotalGanti) >= 1 ||
+        Math.abs(Number(saved.total_upah || 0) - liveTotalUpah) >= 1 ||
+        Math.abs(Number(saved.gaji_bersih || 0) - liveGajiBersih) >= 1;
+
+      if (isOutOfSync) {
+        await db.query(`
+          UPDATE gaji SET
+            total_jam = ?,
+            total_hari = ?,
+            jam_normal = ?,
+            jam_lembur = ?,
+            total_upah = ?,
+            upah_normal = ?,
+            total_ganti = ?,
+            gaji_bersih = ?,
+            sisa_pembayaran = ?,
+            status_bayar = ?
+          WHERE id_gaji = ?
+        `, [
+          totalJam,
+          hariKerja,
+          jamNormal,
+          jamLembur,
+          liveTotalUpah,
+          liveUpahNormal,
+          liveTotalGanti,
+          liveGajiBersih,
+          liveSisa,
+          liveStatusBayar,
+          saved.id_gaji
+        ]);
+
+        saved.total_jam = totalJam;
+        saved.total_hari = hariKerja;
+        saved.jam_normal = jamNormal;
+        saved.jam_lembur = jamLembur;
+        saved.total_upah = liveTotalUpah;
+        saved.upah_normal = liveUpahNormal;
+        saved.total_ganti = liveTotalGanti;
+        saved.gaji_bersih = liveGajiBersih;
+        saved.sisa_pembayaran = liveSisa;
+        saved.status_bayar = liveStatusBayar;
+      }
+
+      result.push({
+        id_gaji: Number(saved.id_gaji),
+        id_karyawan: unit.id_karyawan,
+        id_pekerjaan: unit.id_pekerjaan,
+        id_penugasan: unit.id_penugasan || saved.id_penugasan || null,
+        nama_pekerjaan: saved.nama_pekerjaan || unit.nama_pekerjaan,
+        kode_pekerjaan: saved.kode_pekerjaan || unit.kode_pekerjaan,
+        kode_karyawan: k.kode_karyawan || saved.kode_karyawan,
+        nama: k.nama || saved.nama_karyawan,
+        nama_karyawan: k.nama || saved.nama_karyawan,
+        jabatan: saved.jabatan || unit.jabatan,
+        nama_role: saved.jabatan || unit.nama_role,
+        hierarchy_level: unit.hierarchy_level || 1,
+        periode: saved.periode,
+        jenis_upah: saved.jenis_upah || effectiveJenis,
+        total_jam: Number(saved.total_jam !== undefined ? saved.total_jam : totalJam),
+        total_hari: Number(saved.total_hari !== undefined ? saved.total_hari : hariKerja),
+        jam_normal: Number(saved.jam_normal !== undefined ? saved.jam_normal : jamNormal),
+        jam_lembur: Number(saved.jam_lembur !== undefined ? saved.jam_lembur : jamLembur),
+        tarif: Number(saved.tarif) || effectiveTarif,
+        upah_normal: Number(saved.upah_normal !== undefined ? saved.upah_normal : liveUpahNormal),
+        upah_lembur: Number(saved.upah_lembur || 0),
+        catatan_lembur: saved.catatan_lembur || '',
+        total_upah: Number(saved.total_upah !== undefined ? saved.total_upah : liveTotalUpah),
+        total_upah_pokok: Number(saved.upah_normal !== undefined ? saved.upah_normal : liveUpahNormal),
+        total_upah_lembur: Number(saved.upah_lembur || 0),
+        total_jam_lembur: Number(saved.jam_lembur !== undefined ? saved.jam_lembur : jamLembur),
+        lembur_diizinkan: 1,
+        total_ganti: Number(saved.total_ganti !== undefined ? saved.total_ganti : liveTotalGanti),
+        bonus: liveBonus,
+        potongan: livePotongan,
+        catatan_penyesuaian: saved.catatan_penyesuaian || '',
+        gaji_bersih: Number(saved.gaji_bersih !== undefined ? saved.gaji_bersih : liveGajiBersih),
+        total_dibayar: liveSudahDibayar,
+        sisa_pembayaran: Number(saved.sisa_pembayaran !== undefined ? saved.sisa_pembayaran : liveSisa),
+        status_bayar: saved.status_bayar || 'belum',
+        status_penetapan: saved.status_penetapan || 'ditetapkan',
+        sudah_ditetapkan: saved.status_penetapan === 'ditetapkan',
+        absensi_count: unitAbsensi.length
+      });
+    } else {
+      const gajiBersih = totalUpahDihitung + totalGanti;
+      result.push({
+        id_gaji: null,
+        id_karyawan: unit.id_karyawan,
+        id_pekerjaan: unit.id_pekerjaan,
+        id_penugasan: unit.id_penugasan || null,
+        nama_pekerjaan: unit.nama_pekerjaan,
+        kode_pekerjaan: unit.kode_pekerjaan,
+        kode_karyawan: k.kode_karyawan,
+        nama: k.nama,
+        nama_karyawan: k.nama,
+        jabatan: unit.jabatan,
+        nama_role: unit.nama_role,
+        hierarchy_level: unit.hierarchy_level || 1,
+        periode,
+        jenis_upah: effectiveJenis,
+        total_jam: totalJam,
+        total_hari: hariKerja,
+        jam_normal: jamNormal,
+        jam_lembur: jamLembur,
+        tarif: effectiveTarif,
+        upah_normal: upahNormal,
+        upah_lembur: 0,
+        catatan_lembur: '',
+        total_upah: totalUpahDihitung,
+        total_upah_pokok: upahNormal,
+        total_upah_lembur: 0,
+        total_jam_lembur: jamLembur,
+        lembur_diizinkan: 1,
+        total_ganti: totalGanti,
+        bonus: 0,
+        potongan: 0,
+        catatan_penyesuaian: '',
+        gaji_bersih: gajiBersih,
+        total_dibayar: 0,
+        sisa_pembayaran: gajiBersih,
+        status_bayar: 'belum',
+        status_penetapan: 'draft',
+        sudah_ditetapkan: false,
+        absensi_count: unitAbsensi.length
+      });
+    }
+  }
+
+  return result;
+}
+
 // 1. Dispatcher Utama / Rekap Penggajian Seluruh Karyawan Berbasis Proyek (Admin)
 async function getRekapGaji(req, res) {
   try {
@@ -418,336 +810,13 @@ async function getRekapGaji(req, res) {
     const filterIdPekerjaan = req.query.id_pekerjaan && req.query.id_pekerjaan !== 'semua'
       ? Number(req.query.id_pekerjaan)
       : null;
-    const filterIdKaryawan = req.query.id_karyawan && req.query.id_karyawan !== 'semua'
-      ? Number(req.query.id_karyawan)
-      : null;
+    const filterIdKaryawan = req.user?.peran === 'karyawan'
+      ? Number(req.user.id_karyawan)
+      : (req.query.id_karyawan && req.query.id_karyawan !== 'semua'
+        ? Number(req.query.id_karyawan)
+        : null);
 
-    // 1. Ambil data penetapan gaji yang sudah tersimpan di database untuk periode ini
-    const [savedGajiList] = await db.query(`
-      SELECT g.*, 
-             k.nama AS nama_karyawan, k.kode_karyawan, k.jabatan AS master_jabatan,
-             p.nama_pekerjaan, p.kode_pekerjaan
-      FROM gaji g
-      JOIN karyawan k ON g.id_karyawan = k.id_karyawan
-      LEFT JOIN pekerjaan p ON g.id_pekerjaan = p.id_pekerjaan
-      WHERE g.periode = ?
-    `, [periode]);
-
-    const savedMap = new Map();
-    savedGajiList.forEach(g => {
-      const pKey = g.id_pekerjaan !== null && g.id_pekerjaan !== undefined ? String(g.id_pekerjaan) : 'null';
-      savedMap.set(`${g.id_karyawan}_${pKey}`, g);
-    });
-
-    // 2. Ambil penugasan proyek aktif
-    const [assignments] = await db.query(`
-      SELECT pn.id_penugasan, pn.id_karyawan, pn.id_pekerjaan, pn.id_role_budget,
-             COALESCE(pn.jenis_upah, 'per_jam') AS jenis_upah,
-             COALESCE(pn.nominal_upah, 0) AS nominal_upah,
-             pn.peran_tugas, pn.tanggal_penugasan, pn.tanggal_selesai_tugas,
-             k.nama AS nama_karyawan, k.kode_karyawan, k.jabatan AS master_jabatan,
-             k.nominal_upah AS master_nominal_upah, k.tarif_per_jam AS master_tarif_per_jam,
-             k.jenis_upah AS master_jenis_upah,
-             p.nama_pekerjaan, p.kode_pekerjaan, p.status AS status_pekerjaan,
-             mr.nama_role, mr.hierarchy_level
-      FROM penugasan pn
-      JOIN karyawan k ON pn.id_karyawan = k.id_karyawan
-      JOIN pekerjaan p ON pn.id_pekerjaan = p.id_pekerjaan
-      LEFT JOIN pekerjaan_role_budget prb ON pn.id_role_budget = prb.id_role_budget
-      LEFT JOIN master_role mr ON prb.id_role = mr.id_role
-      WHERE (pn.status_penugasan IS NULL OR pn.status_penugasan = 'aktif')
-      ORDER BY p.nama_pekerjaan ASC, k.nama ASC
-    `);
-
-    // 3. Ambil riwayat skema gaji penugasan (penugasan_gaji_riwayat)
-    const [salaryHistories] = await db.query(
-      'SELECT * FROM penugasan_gaji_riwayat ORDER BY id_penugasan ASC, effective_from ASC, id_riwayat_gaji ASC'
-    );
-    const historyMap = new Map();
-    salaryHistories.forEach(h => {
-      const pIdNum = Number(h.id_penugasan);
-      if (!historyMap.has(pIdNum)) historyMap.set(pIdNum, []);
-      historyMap.get(pIdNum).push(h);
-    });
-
-    // 4. Ambil seluruh absensi yang disetujui pada periode ini
-    const [allApprovedAbsensi] = await db.query(`
-      SELECT 
-        a.id_absensi,
-        a.id_karyawan,
-        a.tanggal,
-        a.jam_masuk,
-        a.jam_pulang,
-        a.id_pekerjaan,
-        p.nama_pekerjaan,
-        ${sqlDurasi} AS durasi_jam
-      FROM absensi a
-      LEFT JOIN pekerjaan p ON a.id_pekerjaan = p.id_pekerjaan
-      WHERE a.status_verifikasi = 'disetujui'
-        AND a.jam_pulang IS NOT NULL
-        AND a.tanggal LIKE ?
-      ORDER BY a.tanggal ASC, a.jam_masuk ASC
-    `, [`${periode}%`]);
-
-    // Jalankan aturan jam kerja normal 8 jam/hari & akumulasi lembur harian lintas proyek (Section 5 Prompt Final)
-    const splitAbsensiList = calculateDailyOvertimeSplits(allApprovedAbsensi);
-
-    // 5. Ambil reimbursement pribadi yang disetujui pada periode ini
-    const [allReimburse] = await db.query(`
-      SELECT id_karyawan, id_pekerjaan, COALESCE(nominal, 0) AS nominal
-      FROM pengeluaran
-      WHERE jenis_dana = 'pribadi'
-        AND status_verifikasi = 'disetujui'
-        AND tanggal LIKE ?
-    `, [`${periode}%`]);
-
-    // 6. Ambil semua karyawan
-    const [karyawanList] = await db.query(
-      'SELECT id_karyawan, kode_karyawan, nama, jabatan, jenis_upah, nominal_upah, tarif_per_jam, status FROM karyawan ORDER BY nama ASC'
-    );
-    const karyawanMap = new Map(karyawanList.map(k => [Number(k.id_karyawan), k]));
-
-    // 7. Bentuk unit unik per (id_karyawan, id_pekerjaan)
-    const unitMap = new Map();
-
-    // Dari penugasan
-    assignments.forEach(as => {
-      const key = `${as.id_karyawan}_${as.id_pekerjaan}`;
-      unitMap.set(key, {
-        id_karyawan: Number(as.id_karyawan),
-        id_pekerjaan: Number(as.id_pekerjaan),
-        id_penugasan: Number(as.id_penugasan),
-        nama_pekerjaan: as.nama_pekerjaan,
-        kode_pekerjaan: as.kode_pekerjaan,
-        jabatan: as.nama_role || as.peran_tugas || as.master_jabatan || 'Pelaksana',
-        nama_role: as.nama_role || as.master_jabatan || 'Pelaksana',
-        hierarchy_level: as.hierarchy_level || 1,
-        jenis_upah: as.jenis_upah || 'per_jam',
-        nominal_upah: Number(as.nominal_upah || 0)
-      });
-    });
-
-    // Dari absensi yang tercatat
-    allApprovedAbsensi.forEach(a => {
-      const pId = a.id_pekerjaan ? Number(a.id_pekerjaan) : null;
-      const key = `${a.id_karyawan}_${pId !== null ? pId : 'null'}`;
-      if (!unitMap.has(key)) {
-        const k = karyawanMap.get(Number(a.id_karyawan));
-        unitMap.set(key, {
-          id_karyawan: Number(a.id_karyawan),
-          id_pekerjaan: pId,
-          id_penugasan: null,
-          nama_pekerjaan: a.nama_pekerjaan || (pId ? `Proyek #${pId}` : 'Umum / Non-Proyek'),
-          kode_pekerjaan: pId ? `PRJ-${pId}` : 'NON-PRJ',
-          jabatan: k?.jabatan || 'Pelaksana',
-          nama_role: k?.jabatan || 'Pelaksana',
-          hierarchy_level: 1,
-          jenis_upah: k?.jenis_upah || 'per_jam',
-          nominal_upah: Number(k?.nominal_upah || k?.tarif_per_jam || 0)
-        });
-      }
-    });
-
-    // Dari catatan gaji tersimpan
-    savedGajiList.forEach(g => {
-      const pId = g.id_pekerjaan !== null && g.id_pekerjaan !== undefined ? Number(g.id_pekerjaan) : null;
-      const key = `${g.id_karyawan}_${pId !== null ? pId : 'null'}`;
-      if (!unitMap.has(key)) {
-        const k = karyawanMap.get(Number(g.id_karyawan));
-        unitMap.set(key, {
-          id_karyawan: Number(g.id_karyawan),
-          id_pekerjaan: pId,
-          id_penugasan: g.id_penugasan ? Number(g.id_penugasan) : null,
-          nama_pekerjaan: g.nama_pekerjaan || (pId ? `Proyek #${pId}` : 'Umum / Non-Proyek'),
-          kode_pekerjaan: g.kode_pekerjaan || (pId ? `PRJ-${pId}` : 'NON-PRJ'),
-          jabatan: g.jabatan || k?.jabatan || 'Pelaksana',
-          nama_role: g.jabatan || k?.jabatan || 'Pelaksana',
-          hierarchy_level: 1,
-          jenis_upah: g.jenis_upah || 'per_jam',
-          nominal_upah: Number(g.tarif || 0)
-        });
-      }
-    });
-
-    // Masukkan karyawan aktif yang belum terdaftar di proyek agar tetap dapat dipantau di payroll umum
-    karyawanList.forEach(k => {
-      const hasAny = Array.from(unitMap.values()).some(u => u.id_karyawan === Number(k.id_karyawan));
-      if (!hasAny) {
-        const key = `${k.id_karyawan}_null`;
-        unitMap.set(key, {
-          id_karyawan: Number(k.id_karyawan),
-          id_pekerjaan: null,
-          id_penugasan: null,
-          nama_pekerjaan: 'Umum / Non-Proyek',
-          kode_pekerjaan: 'NON-PRJ',
-          jabatan: k.jabatan || 'Staf',
-          nama_role: k.jabatan || 'Staf',
-          hierarchy_level: 1,
-          jenis_upah: k.jenis_upah || 'per_jam',
-          nominal_upah: Number(k.nominal_upah || k.tarif_per_jam || 0)
-        });
-      }
-    });
-
-    // 8. Kalkulasi penggajian per unit proyek
-    const result = [];
-
-    for (const [key, unit] of unitMap.entries()) {
-      if (filterIdPekerjaan !== null && unit.id_pekerjaan !== filterIdPekerjaan) continue;
-      if (filterIdKaryawan !== null && unit.id_karyawan !== filterIdKaryawan) continue;
-
-      const k = karyawanMap.get(unit.id_karyawan) || {};
-      const saved = savedMap.get(key);
-
-      // Ambil absensi khusus unit proyek ini yang sudah terpecah jam_normal dan jam_lembur
-      const unitAbsensi = splitAbsensiList.filter(a => {
-        const matchKaryawan = Number(a.id_karyawan) === unit.id_karyawan;
-        const matchPekerjaan = unit.id_pekerjaan !== null
-          ? Number(a.id_pekerjaan) === unit.id_pekerjaan
-          : (!a.id_pekerjaan || Number(a.id_pekerjaan) === 0);
-        return matchKaryawan && matchPekerjaan;
-      });
-
-      const jamNormal = Number(unitAbsensi.reduce((acc, s) => acc + Number(s.jam_normal || 0), 0).toFixed(2));
-      const jamLembur = Number(unitAbsensi.reduce((acc, s) => acc + Number(s.jam_lembur || 0), 0).toFixed(2));
-      const totalJam = Number((jamNormal + jamLembur).toFixed(2));
-
-      const uniqueDays = new Set(unitAbsensi.map(s => String(s.tanggal).slice(0, 10)));
-      const hariKerja = uniqueDays.size;
-
-      // Resolusi tarif upah dari penugasan atau riwayat skema gaji
-      let effectiveTarif = unit.nominal_upah;
-      let effectiveJenis = unit.jenis_upah;
-
-      if (unit.id_penugasan && historyMap.has(unit.id_penugasan)) {
-        const histList = historyMap.get(unit.id_penugasan);
-        const latestHist = resolveSalaryForDate(histList, `${periode}-15`, {
-          jenis_upah: unit.jenis_upah,
-          nominal_upah: unit.nominal_upah
-        });
-        if (latestHist && Number(latestHist.nominal_upah) > 0) {
-          effectiveTarif = Number(latestHist.nominal_upah);
-          effectiveJenis = latestHist.jenis_upah;
-        }
-      }
-
-      if (!effectiveTarif && k.nominal_upah) {
-        effectiveTarif = Number(k.nominal_upah);
-        effectiveJenis = k.jenis_upah || effectiveJenis;
-      }
-
-      // Hitung upah normal
-      let upahNormal = 0;
-      if (effectiveJenis === 'per_jam') {
-        upahNormal = Math.round(jamNormal * effectiveTarif);
-      } else if (effectiveJenis === 'per_hari') {
-        upahNormal = Math.round(hariKerja * effectiveTarif);
-      } else if (effectiveJenis === 'per_bulan' || effectiveJenis === 'borongan') {
-        upahNormal = Math.round(effectiveTarif);
-      } else if (effectiveJenis === 'per_tahun') {
-        upahNormal = Math.round(effectiveTarif / 12);
-      }
-
-      // Upah lembur: Sesuai Section 5 Prompt Final, nominal lembur belum ditentukan Direktur.
-      // Sediakan nilai jika sudah diset Admin, default 0 tanpa mengarang pengali.
-      const upahLembur = saved ? Number(saved.upah_lembur || 0) : 0;
-      const totalUpahDihitung = upahNormal + upahLembur;
-
-      // Reimbursement disetujui untuk unit proyek ini
-      const unitReimburses = allReimburse.filter(r => {
-        const matchK = Number(r.id_karyawan) === unit.id_karyawan;
-        const matchP = unit.id_pekerjaan !== null
-          ? Number(r.id_pekerjaan) === unit.id_pekerjaan
-          : (!r.id_pekerjaan || Number(r.id_pekerjaan) === 0);
-        return matchK && matchP;
-      });
-      const totalGanti = unitReimburses.reduce((acc, r) => acc + Number(r.nominal || 0), 0);
-
-      if (saved) {
-        result.push({
-          id_gaji: Number(saved.id_gaji),
-          id_karyawan: unit.id_karyawan,
-          id_pekerjaan: unit.id_pekerjaan,
-          id_penugasan: unit.id_penugasan || saved.id_penugasan || null,
-          nama_pekerjaan: saved.nama_pekerjaan || unit.nama_pekerjaan,
-          kode_pekerjaan: saved.kode_pekerjaan || unit.kode_pekerjaan,
-          kode_karyawan: k.kode_karyawan || saved.kode_karyawan,
-          nama: k.nama || saved.nama_karyawan,
-          nama_karyawan: k.nama || saved.nama_karyawan,
-          jabatan: saved.jabatan || unit.jabatan,
-          nama_role: saved.jabatan || unit.nama_role,
-          hierarchy_level: unit.hierarchy_level || 1,
-          periode: saved.periode,
-          jenis_upah: saved.jenis_upah || effectiveJenis,
-          total_jam: Number(saved.total_jam) || totalJam,
-          total_hari: Number(saved.total_hari) || hariKerja,
-          jam_normal: Number(saved.jam_normal !== undefined ? saved.jam_normal : jamNormal),
-          jam_lembur: Number(saved.jam_lembur !== undefined ? saved.jam_lembur : jamLembur),
-          tarif: Number(saved.tarif) || effectiveTarif,
-          upah_normal: Number(saved.upah_normal !== undefined ? saved.upah_normal : upahNormal),
-          upah_lembur: Number(saved.upah_lembur || 0),
-          catatan_lembur: saved.catatan_lembur || '',
-          total_upah: Number(saved.total_upah) || totalUpahDihitung,
-          total_upah_pokok: Number(saved.upah_normal !== undefined ? saved.upah_normal : upahNormal),
-          total_upah_lembur: Number(saved.upah_lembur || 0),
-          total_jam_lembur: Number(saved.jam_lembur !== undefined ? saved.jam_lembur : jamLembur),
-          lembur_diizinkan: 1,
-          total_ganti: Number(saved.total_ganti) || totalGanti,
-          bonus: Number(saved.bonus) || 0,
-          potongan: Number(saved.potongan) || 0,
-          catatan_penyesuaian: saved.catatan_penyesuaian || '',
-          gaji_bersih: Number(saved.gaji_bersih) || 0,
-          total_dibayar: Number(saved.total_dibayar) || 0,
-          sisa_pembayaran: Number(saved.sisa_pembayaran) || 0,
-          status_bayar: saved.status_bayar || 'belum',
-          status_penetapan: saved.status_penetapan || 'ditetapkan',
-          sudah_ditetapkan: saved.status_penetapan === 'ditetapkan',
-          absensi_count: unitAbsensi.length
-        });
-      } else {
-        const gajiBersih = totalUpahDihitung + totalGanti;
-        result.push({
-          id_gaji: null,
-          id_karyawan: unit.id_karyawan,
-          id_pekerjaan: unit.id_pekerjaan,
-          id_penugasan: unit.id_penugasan || null,
-          nama_pekerjaan: unit.nama_pekerjaan,
-          kode_pekerjaan: unit.kode_pekerjaan,
-          kode_karyawan: k.kode_karyawan,
-          nama: k.nama,
-          nama_karyawan: k.nama,
-          jabatan: unit.jabatan,
-          nama_role: unit.nama_role,
-          hierarchy_level: unit.hierarchy_level || 1,
-          periode,
-          jenis_upah: effectiveJenis,
-          total_jam: totalJam,
-          total_hari: hariKerja,
-          jam_normal: jamNormal,
-          jam_lembur: jamLembur,
-          tarif: effectiveTarif,
-          upah_normal: upahNormal,
-          upah_lembur: 0,
-          catatan_lembur: '',
-          total_upah: totalUpahDihitung,
-          total_upah_pokok: upahNormal,
-          total_upah_lembur: 0,
-          total_jam_lembur: jamLembur,
-          lembur_diizinkan: 1,
-          total_ganti: totalGanti,
-          bonus: 0,
-          potongan: 0,
-          catatan_penyesuaian: '',
-          gaji_bersih: gajiBersih,
-          total_dibayar: 0,
-          sisa_pembayaran: gajiBersih,
-          status_bayar: 'belum',
-          status_penetapan: 'draft',
-          sudah_ditetapkan: false,
-          absensi_count: unitAbsensi.length
-        });
-      }
-    }
+    const result = await computeRekapGajiData(periode, filterIdPekerjaan, filterIdKaryawan);
 
     return res.json({
       success: true,
@@ -773,11 +842,20 @@ async function kalkulasiGaji(req, res) {
 // 3. Detail Sesi Jam Kerja & Breakdown Penggajian Seorang Karyawan
 async function getDetailGaji(req, res) {
   try {
-    const id_karyawan = req.query.id_karyawan || req.user?.id_karyawan;
+    const id_karyawan = req.user?.peran === 'karyawan'
+      ? Number(req.user.id_karyawan)
+      : (req.query.id_karyawan || req.user?.id_karyawan);
     const periode = getPeriode(req);
 
     if (!id_karyawan) {
       return res.status(400).json({ success: false, message: 'ID Karyawan wajib disertakan' });
+    }
+
+    // Pastikan kalkulasi sinkron jika ada penambahan presensi/reimburse baru
+    try {
+      await computeRekapGajiData(periode);
+    } catch (syncErr) {
+      console.warn('Sync in getDetailGaji non-blocking:', syncErr.message);
     }
 
     const [kRows] = await db.query('SELECT * FROM karyawan WHERE id_karyawan = ?', [id_karyawan]);
@@ -794,7 +872,9 @@ async function getDetailGaji(req, res) {
     // Ambil data penetapan jika sudah tersimpan
     let gajiLocked = null;
     if (id_gaji) {
-      const [gRows] = await db.query('SELECT * FROM gaji WHERE id_gaji = ?', [id_gaji]);
+      const [gRows] = req.user?.peran === 'karyawan'
+        ? await db.query('SELECT * FROM gaji WHERE id_gaji = ? AND id_karyawan = ?', [id_gaji, id_karyawan])
+        : await db.query('SELECT * FROM gaji WHERE id_gaji = ?', [id_gaji]);
       if (gRows.length > 0) gajiLocked = gRows[0];
     } else if (id_pekerjaan !== null) {
       const [gRows] = await db.query('SELECT * FROM gaji WHERE id_karyawan = ? AND id_pekerjaan = ? AND periode = ?', [id_karyawan, id_pekerjaan, periode]);
@@ -833,7 +913,7 @@ async function getDetailGaji(req, res) {
 
     // Ambil klaim reimburse uang pribadi pada periode ini
     const [rawReimburseList] = await db.query(`
-      SELECT pg.id_pengeluaran, pg.tanggal, pg.nominal, pg.keterangan, pg.status_verifikasi,
+      SELECT pg.id_pengeluaran, pg.tanggal, pg.nominal, pg.keterangan, pg.jenis_dana, pg.status_verifikasi,
              pg.status_reimbursement, pg.status_ganti, pg.foto_kwitansi, pg.id_pekerjaan,
              p.nama_pekerjaan, p.lokasi
       FROM pengeluaran pg
@@ -862,7 +942,12 @@ async function getDetailGaji(req, res) {
     // Ambil penugasan proyek karyawan
     const [assignments] = await db.query(`
       SELECT pn.id_pekerjaan, pn.peran_tugas, pn.id_role_budget,
-             p.nama_pekerjaan, p.kode_pekerjaan, p.lokasi, p.status AS status_pekerjaan, p.jenis_upah, p.nominal_upah, p.lembur_diizinkan,
+             pn.tanggal_penugasan, pn.tanggal_selesai_tugas,
+             p.nama_pekerjaan, p.kode_pekerjaan, p.lokasi, p.status AS status_pekerjaan,
+             p.tanggal_mulai, p.target_selesai, p.created_at,
+             COALESCE(pn.jenis_upah, p.jenis_upah) AS jenis_upah,
+             COALESCE(pn.nominal_upah, p.nominal_upah, 0) AS nominal_upah,
+             p.lembur_diizinkan,
              prb.gaji_min_bulanan, prb.gaji_max_bulanan,
              mr.id_role, mr.nama_role, mr.hierarchy_level
       FROM penugasan pn
@@ -892,8 +977,10 @@ async function getDetailGaji(req, res) {
     const touchJob = (jobId, jobName, jobLocation, jobStatus, jobPeran, jobJenis, jobRate, roleBudget) => {
       const idNum = Number(jobId);
       if (!idNum) return null;
-      const effectiveRate = tarif > 0 ? tarif : (Number(jobRate) || 0);
-      const effectiveType = jenisUpah || jobJenis || 'per_jam';
+      // Tarif pada penugasan adalah skema khusus proyek/role. Tarif slip umum
+      // tidak boleh menimpa tarif setiap proyek.
+      const effectiveRate = Number(jobRate) || 0;
+      const effectiveType = jobJenis || 'per_jam';
 
       if (!jobMap.has(idNum)) {
         jobMap.set(idNum, {
@@ -932,12 +1019,55 @@ async function getDetailGaji(req, res) {
       return jobMap.get(idNum);
     };
 
+    const toYearMonth = (val) => {
+      if (!val) return '';
+      if (val instanceof Date && !Number.isNaN(val.getTime())) {
+        return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit' }).format(val).slice(0, 7);
+      }
+      const str = String(val).trim();
+      return /^\d{4}-\d{2}/.test(str) ? str.slice(0, 7) : '';
+    };
+
+    const assignmentMap = new Map(assignments.map(as => [Number(as.id_pekerjaan), as]));
+
     assignments.forEach(as => {
-      touchJob(as.id_pekerjaan, as.nama_pekerjaan, as.lokasi, as.status_pekerjaan, as.peran_tugas, as.jenis_upah, as.nominal_upah, as);
+      const startMonth = toYearMonth(as.tanggal_penugasan || as.tanggal_mulai || as.created_at);
+      const endMonth = toYearMonth(as.tanggal_selesai_tugas || as.target_selesai);
+      const inPeriodStart = !startMonth || startMonth <= periode;
+      const inPeriodEnd = !endMonth || endMonth >= periode;
+      const isActiveForPeriod = inPeriodStart && inPeriodEnd && as.status_pekerjaan !== 'selesai';
+      if (isActiveForPeriod) {
+        touchJob(as.id_pekerjaan, as.nama_pekerjaan, as.lokasi, as.status_pekerjaan, as.peran_tugas, as.jenis_upah, as.nominal_upah, as);
+      }
     });
 
+    rawKantorList.forEach(k => {
+      if (Number(k.total_kantor || 0) > 0) {
+        const as = assignmentMap.get(Number(k.id_pekerjaan));
+        if (as) {
+          touchJob(as.id_pekerjaan, as.nama_pekerjaan, as.lokasi, as.status_pekerjaan, as.peran_tugas, as.jenis_upah, as.nominal_upah, as);
+        } else {
+          touchJob(k.id_pekerjaan);
+        }
+      }
+    });
+
+    const touchJobWithAssignment = (jobId, jobName, jobLocation, jobStatus, jobPeran, jobJenis, jobRate) => {
+      const as = assignmentMap.get(Number(jobId));
+      return touchJob(
+        jobId,
+        jobName || as?.nama_pekerjaan,
+        jobLocation || as?.lokasi,
+        jobStatus || as?.status_pekerjaan,
+        jobPeran || as?.peran_tugas,
+        jobJenis || as?.jenis_upah,
+        jobRate ?? as?.nominal_upah,
+        as || null
+      );
+    };
+
     legacyCalc.sessionBreakdown.forEach(a => {
-      const entry = touchJob(a.id_pekerjaan, a.nama_pekerjaan, a.lokasi, a.status_pekerjaan, null, a.effective_jenis, a.effective_tarif);
+      const entry = touchJobWithAssignment(a.id_pekerjaan, a.nama_pekerjaan, a.lokasi, a.status_pekerjaan, null, a.effective_jenis, a.effective_tarif);
       if (entry) {
         entry.jumlah_sesi_disetujui += 1;
         entry.total_jam_disetujui = Number((entry.total_jam_disetujui + Number(a.durasi_jam || 0)).toFixed(2));
@@ -946,13 +1076,27 @@ async function getDetailGaji(req, res) {
     });
 
     // Sesuaikan estimasi_upah pada pekerjaan_summary jika ada segmen kalkulasi proyek
+    const detailedProjectIds = new Set();
     detailedCalc.rincianSegmenGaji.forEach(seg => {
       if (seg.id_pekerjaan && jobMap.has(seg.id_pekerjaan)) {
         const entry = jobMap.get(seg.id_pekerjaan);
-        entry.estimasi_upah = seg.subtotal_upah;
-        entry.upah_pokok = seg.upah_pokok !== undefined ? seg.upah_pokok : (seg.subtotal_upah - (seg.upah_lembur || 0));
-        entry.upah_lembur = seg.upah_lembur || 0;
-        entry.jam_lembur = seg.jam_lembur || 0;
+        if (!detailedProjectIds.has(seg.id_pekerjaan)) {
+          // Ganti estimasi legacy dengan hasil payroll per segmen, lalu jumlahkan
+          // semua skema yang berlaku pada proyek tersebut selama periode ini.
+          entry.estimasi_upah = 0;
+          entry.upah_pokok = 0;
+          entry.upah_lembur = 0;
+          entry.jam_lembur = 0;
+          detailedProjectIds.add(seg.id_pekerjaan);
+        }
+        entry.estimasi_upah += Number(seg.subtotal_upah || 0);
+        entry.upah_pokok += Number(seg.upah_pokok !== undefined ? seg.upah_pokok : (seg.subtotal_upah - (seg.upah_lembur || 0)));
+        entry.upah_lembur += Number(seg.upah_lembur || 0);
+        entry.jam_lembur += Number(seg.jam_lembur || 0);
+        // Bila tarif berubah di tengah periode, tampilkan skema yang berlaku
+        // pada segmen terakhir; nilai estimasi tetap menjumlahkan semua segmen.
+        entry.jenis_upah = seg.jenis_upah || entry.jenis_upah;
+        entry.nominal_upah = Number(seg.nominal_upah || 0);
         entry.lembur_diizinkan = seg.lembur_diizinkan;
         if (seg.role_nama) entry.nama_role = seg.role_nama;
         if (seg.role_level) entry.hierarchy_level = seg.role_level;
@@ -960,14 +1104,14 @@ async function getDetailGaji(req, res) {
     });
 
     pendingAbsensi.forEach(a => {
-      const entry = touchJob(a.id_pekerjaan, a.nama_pekerjaan, a.lokasi, a.status_pekerjaan, null, a.job_jenis_upah, a.job_nominal_upah);
+      const entry = touchJobWithAssignment(a.id_pekerjaan, a.nama_pekerjaan, a.lokasi, a.status_pekerjaan, null, a.job_jenis_upah, a.job_nominal_upah);
       if (entry) {
         entry.jumlah_sesi_menunggu += 1;
       }
     });
 
     approvedReimburse.forEach(r => {
-      const entry = touchJob(r.id_pekerjaan, r.nama_pekerjaan, r.lokasi);
+      const entry = touchJobWithAssignment(r.id_pekerjaan, r.nama_pekerjaan, r.lokasi);
       if (entry) {
         entry.jumlah_nota += 1;
         entry.reimbursement_disetujui += Number(r.nominal || 0);
@@ -978,7 +1122,7 @@ async function getDetailGaji(req, res) {
     });
 
     pendingReimburse.forEach(r => {
-      const entry = touchJob(r.id_pekerjaan, r.nama_pekerjaan, r.lokasi);
+      const entry = touchJobWithAssignment(r.id_pekerjaan, r.nama_pekerjaan, r.lokasi);
       if (entry) {
         entry.reimbursement_menunggu += Number(r.nominal || 0);
       }
@@ -1421,6 +1565,13 @@ async function getPembayaranList(req, res) {
       ? Number(req.query.id_pekerjaan)
       : null;
 
+    // Sinkronisasikan gaji dengan presensi & reimbursement terbaru secara real-time
+    try {
+      await computeRekapGajiData(periode);
+    } catch (syncErr) {
+      console.warn('Sync in getPembayaranList non-blocking:', syncErr.message);
+    }
+
     let query = `
       SELECT g.*, 
              k.nama AS nama_karyawan, k.kode_karyawan, COALESCE(g.jabatan, k.jabatan) AS jabatan,
@@ -1435,6 +1586,11 @@ async function getPembayaranList(req, res) {
     if (id_pekerjaan !== null) {
       query += ` AND g.id_pekerjaan = ? `;
       params.push(id_pekerjaan);
+    }
+
+    if (req.user?.peran === 'karyawan') {
+      query += ` AND g.id_karyawan = ? `;
+      params.push(Number(req.user.id_karyawan));
     }
 
     if (status_bayar && status_bayar !== 'semua') {
@@ -1455,7 +1611,15 @@ async function getPembayaranList(req, res) {
 async function getPembayaranHistory(req, res) {
   try {
     const id_gaji = req.params.id || req.query.id_gaji;
-    const [rows] = await db.query('SELECT * FROM pembayaran_gaji WHERE id_gaji = ? ORDER BY id_pembayaran DESC', [id_gaji]);
+    const isWorker = req.user?.peran === 'karyawan';
+    const query = `
+      SELECT pg.* FROM pembayaran_gaji pg
+      JOIN gaji g ON g.id_gaji = pg.id_gaji
+      WHERE pg.id_gaji = ? ${isWorker ? 'AND g.id_karyawan = ?' : ''}
+      ORDER BY pg.id_pembayaran DESC
+    `;
+    const params = isWorker ? [id_gaji, Number(req.user.id_karyawan)] : [id_gaji];
+    const [rows] = await db.query(query, params);
     return res.json({ success: true, data: rows });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
@@ -1466,6 +1630,7 @@ async function getPembayaranHistory(req, res) {
 async function getSlipGaji(req, res) {
   try {
     const id_gaji = req.params.id || req.query.id_gaji;
+    const isWorker = req.user?.peran === 'karyawan';
     const [gRows] = await db.query(`
       SELECT g.*, 
              k.nama, k.kode_karyawan, COALESCE(g.jabatan, k.jabatan) AS jabatan, k.email,
@@ -1474,8 +1639,8 @@ async function getSlipGaji(req, res) {
       FROM gaji g
       JOIN karyawan k ON g.id_karyawan = k.id_karyawan
       LEFT JOIN pekerjaan p ON g.id_pekerjaan = p.id_pekerjaan
-      WHERE g.id_gaji = ?
-    `, [id_gaji]);
+      WHERE g.id_gaji = ? ${isWorker ? 'AND g.id_karyawan = ?' : ''}
+    `, isWorker ? [id_gaji, Number(req.user.id_karyawan)] : [id_gaji]);
 
     if (gRows.length === 0) {
       return res.status(404).json({ success: false, message: 'Data slip gaji tidak ditemukan' });
@@ -1564,7 +1729,16 @@ async function getSlipGaji(req, res) {
 // 10. Riwayat Slip Gaji Karyawan (Arsip Riwayat Penggajian Berbasis Proyek)
 async function getRiwayatGaji(req, res) {
   try {
-    const id_karyawan = req.query.id_karyawan || req.user?.id_karyawan;
+    const activePeriode = req.query.periode || getPeriode(req);
+    try {
+      await computeRekapGajiData(activePeriode);
+    } catch (e) {
+      console.warn('Sync rekap in getRiwayatGaji non-blocking:', e.message);
+    }
+
+    const id_karyawan = req.user?.peran === 'karyawan'
+      ? Number(req.user.id_karyawan)
+      : (req.query.id_karyawan || req.user?.id_karyawan);
     const id_pekerjaan = req.query.id_pekerjaan && req.query.id_pekerjaan !== 'semua'
       ? Number(req.query.id_pekerjaan)
       : null;
