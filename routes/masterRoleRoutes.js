@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { isAdminRole } = require('../utils/roles');
 const {
   getAllMasterRole,
   getMasterRoleById,
@@ -9,7 +10,7 @@ const {
 } = require('../controllers/masterRoleController');
 
 function requireAdmin(req, res, next) {
-  if (req.user && req.user.peran && req.user.peran !== 'admin') {
+  if (!isAdminRole(req.user?.peran)) {
     return res.status(403).json({
       success: false,
       message: 'Akses ditolak. Pengelolaan Master Role hanya untuk Administrator.'

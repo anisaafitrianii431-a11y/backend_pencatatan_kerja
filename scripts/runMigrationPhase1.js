@@ -17,7 +17,7 @@ async function runMigration() {
       \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       INDEX \`idx_hierarchy_active\` (\`hierarchy_level\`, \`is_active\`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
   `);
   console.log('✓ Tabel master_role berhasil dibuat.');
 
@@ -27,7 +27,7 @@ async function runMigration() {
     CREATE TABLE IF NOT EXISTS \`pekerjaan_role_budget\` (
       \`id_role_budget\` INT AUTO_INCREMENT PRIMARY KEY,
       \`id_pekerjaan\` INT NOT NULL,
-      \`id_role\` INT NOT NULL,
+      \`id_role\` INT UNSIGNED NOT NULL,
       \`kuota_slot\` INT NOT NULL DEFAULT 1,
       \`gaji_min_bulanan\` DECIMAL(15,2) NOT NULL,
       \`gaji_max_bulanan\` DECIMAL(15,2) NOT NULL,
@@ -36,7 +36,7 @@ async function runMigration() {
       UNIQUE KEY \`uq_pekerjaan_role\` (\`id_pekerjaan\`, \`id_role\`),
       CONSTRAINT \`fk_prb_pekerjaan\` FOREIGN KEY (\`id_pekerjaan\`) REFERENCES \`pekerjaan\` (\`id_pekerjaan\`) ON DELETE CASCADE,
       CONSTRAINT \`fk_prb_role\` FOREIGN KEY (\`id_role\`) REFERENCES \`master_role\` (\`id_role\`) ON DELETE RESTRICT
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
   `);
   console.log('✓ Tabel pekerjaan_role_budget berhasil dibuat.');
 
@@ -56,7 +56,7 @@ async function runMigration() {
       \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       INDEX \`idx_penugasan_effective\` (\`id_penugasan\`, \`effective_from\`, \`effective_to\`),
       CONSTRAINT \`fk_pgr_penugasan\` FOREIGN KEY (\`id_penugasan\`) REFERENCES \`penugasan\` (\`id_penugasan\`) ON DELETE CASCADE
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
   `);
   console.log('✓ Tabel penugasan_gaji_riwayat berhasil dibuat.');
 
@@ -69,7 +69,14 @@ async function runMigration() {
       AND COLUMN_NAME = 'id_role_budget' 
       AND REFERENCED_TABLE_NAME = 'pekerjaan_role_budget'
   `);
-  if (fkRows.length === 0) {
+  const [roleBudgetColumn] = await db.query(`
+    SELECT COLUMN_NAME
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'penugasan'
+      AND COLUMN_NAME = 'id_role_budget'
+  `);
+  if (fkRows.length === 0 && roleBudgetColumn.length > 0) {
     await db.query(`
       ALTER TABLE \`penugasan\`
       ADD CONSTRAINT \`fk_penugasan_role_budget\`
@@ -77,8 +84,10 @@ async function runMigration() {
       ON DELETE SET NULL
     `);
     console.log('✓ Foreign key fk_penugasan_role_budget berhasil ditambahkan.');
-  } else {
+  } else if (fkRows.length > 0) {
     console.log('Foreign key fk_penugasan_role_budget sudah ada.');
+  } else {
+    console.log('Kolom penugasan.id_role_budget belum tersedia; foreign key dilewati.');
   }
 
   console.log('--- Verifikasi Struktur Selesai Sukses 100% ---');

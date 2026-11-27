@@ -173,12 +173,13 @@ async function createKaryawan(req, res) {
 // 4. Update Data Karyawan
 async function updateKaryawan(req, res) {
   try {
-    const id = req.params.id || req.query.id_karyawan || req.query.id || req.body?.id_karyawan;
+    const id = req.params?.id || req.query?.id_karyawan || req.query?.id || req.body?.id_karyawan;
     if (!id) {
       return res.status(400).json({ success: false, message: 'ID Karyawan wajib disertakan' });
     }
     const { 
       nama, 
+      kode_karyawan,
       jabatan, 
       email, 
       nomor_hp, 
@@ -189,6 +190,7 @@ async function updateKaryawan(req, res) {
       lembur_aktif,
       tarif_lembur,
       alamat, 
+      catatan_admin,
       status 
     } = req.body;
 
@@ -200,6 +202,7 @@ async function updateKaryawan(req, res) {
     const [updateResult] = await db.query(
       `UPDATE karyawan SET 
         nama = COALESCE(?, nama),
+        kode_karyawan = COALESCE(?, kode_karyawan),
         jabatan = COALESCE(?, jabatan),
         email = COALESCE(?, email),
         nomor_hp = COALESCE(?, nomor_hp),
@@ -210,9 +213,10 @@ async function updateKaryawan(req, res) {
         lembur_aktif = COALESCE(?, lembur_aktif),
         tarif_lembur = COALESCE(?, tarif_lembur),
         alamat = COALESCE(?, alamat),
+        catatan_admin = COALESCE(?, catatan_admin),
         status = COALESCE(?, status)
       WHERE id_karyawan = ?`,
-      [nama, jabatan, email, hp, hp, jenis_upah, tarif, tarif, isLembur, nominalLembur, alamat, status, id]
+      [nama, kode_karyawan, jabatan, email, hp, hp, jenis_upah, tarif, tarif, isLembur, nominalLembur, alamat, catatan_admin, status, id]
     );
 
     if (updateResult.affectedRows === 0) {
@@ -236,14 +240,32 @@ async function updateKaryawan(req, res) {
       }
     }
 
+    // Ambil data terbaru untuk dikembalikan ke frontend
+    const [rows] = await db.query(`
+      SELECT 
+        k.*,
+        u.id_user,
+        u.username,
+        u.email AS user_email,
+        u.aktif AS user_aktif,
+        u.peran
+      FROM karyawan k
+      LEFT JOIN \`user\` u ON k.id_karyawan = u.id_karyawan
+      WHERE k.id_karyawan = ?
+      LIMIT 1
+    `, [id]);
+
+    const updatedEmployee = rows[0] || { id_karyawan: Number(id), nama, jabatan };
+
     return res.json({
       success: true,
-      message: 'Data karyawan berhasil diperbarui'
+      message: 'Data karyawan berhasil diperbarui',
+      data: updatedEmployee
     });
   } catch (error) {
     return res.status(500).json({
       success: false,
-      message: 'Gagal memperbarui data karyawan',
+      message: 'Gagal memperbarui data karyawan: ' + error.message,
       error: error.message
     });
   }
